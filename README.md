@@ -10,6 +10,13 @@
 
 ---
 
+## 🌐 Live Demo
+Experience MedVeda-AI live in your browser:
+*   **Frontend**: [https://medveda-ai.onrender.com](https://medveda-ai.onrender.com)
+*   **Backend API**: [https://medveda-backend.onrender.com/health](https://medveda-backend.onrender.com/health)
+
+---
+
 ## 🌟 Key Features
 
 - **🧠 Advanced RAG Architecture**: Grounded in trusted medical encyclopedias (The Gale Encyclopedia, The Merck Manual) to minimize hallucinations.
@@ -46,6 +53,7 @@ graph TD
 | **AI Models** | Groq (Llama-3.3-70b-versatile), HuggingFace Embeddings |
 | **Databases** | Pinecone (Vector), SQLAlchemy (Users), JSON (Chat Persistence) |
 | **Auth** | Google OAuth 2.0, JWT |
+| **Deployment** | Render (Web Service & Static Site) |
 
 ---
 
