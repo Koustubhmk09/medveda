@@ -33,6 +33,8 @@ const App = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState('offline'); // online, offline, initializing
+  const [aiState, setAiState] = useState(null); // loading_embeddings, connecting_vectorstore, etc.
+  const [startupError, setStartupError] = useState(null);
   const [openDropdownId, setOpenDropdownId] = useState(null);
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem('medveda_user');
@@ -133,11 +135,14 @@ const App = () => {
     try {
       const res = await axios.get(`${API_URL}/health`, { timeout: 5000 });
       setBackendStatus(res.data.status);
+      setAiState(res.data.ai_state);
+      setStartupError(res.data.error);
       return res.data.status === 'online';
     } catch (err) {
       // If the backend is completely unreachable (Render cold start), 
       // we show 'initializing' instead of 'offline' to reduce user anxiety.
       setBackendStatus('initializing');
+      setAiState('waking_up');
       return false;
     }
   };
@@ -482,7 +487,11 @@ const App = () => {
             }`}></span>
             <span className="text-sm font-medium text-slate-600">
               {backendStatus === 'online' ? 'MedVeda Online' : 
-               'AI Waking Up... (May take 1 min)'}
+               startupError ? `Error: ${startupError.substring(0, 30)}...` :
+               aiState === 'loading_embeddings' ? 'AI Waking Up... (Loading Models)' :
+               aiState === 'connecting_vectorstore' ? 'AI Waking Up... (Connecting DB)' :
+               aiState === 'waking_up' ? 'AI Waking Up... (Booting Server)' :
+               'AI Waking Up... (Almost Ready)'}
             </span>
           </div>
         </header>
@@ -517,7 +526,9 @@ const App = () => {
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     disabled={backendStatus !== 'online'}
-                    placeholder={backendStatus === 'online' ? "Describe your health concern or ask a question..." : "Waking up AI, please wait..."}
+                    placeholder={backendStatus === 'online' ? "Describe your health concern or ask a question..." : 
+                                 startupError ? "AI Error - See banner for details" :
+                                 "AI is waking up, please wait..."}
                     rows={1}
                     className={`w-full py-4 px-6 bg-transparent focus:outline-none text-lg placeholder:text-slate-400 chat-input custom-scrollbar ${backendStatus !== 'online' ? 'opacity-50' : ''}`}
                   />
@@ -600,10 +611,11 @@ const App = () => {
                   onKeyDown={handleKeyDown}
                   disabled={backendStatus !== 'online'}
                   rows={1}
-                  placeholder={
-                    backendStatus === 'online' ? "Ask anything about your health..." : 
-                    "AI is waking up (Render Cold Start)..."
-                  }
+                    placeholder={
+                      backendStatus === 'online' ? "Ask anything about your health..." : 
+                      startupError ? "AI Error - See banner for details" :
+                      "AI is waking up (Render Cold Start)..."
+                    }
                   className={`w-full p-4 pr-16 bg-transparent focus:outline-none rounded-2xl transition-all placeholder:text-slate-400 chat-input custom-scrollbar ${
                     backendStatus !== 'online' ? 'opacity-50 cursor-not-allowed' : ''
                   }`}

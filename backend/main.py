@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from jose import JWTError, jwt
+import threading
+import time
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
 from typing import Optional
 
 from src.helper import download_hugging_face_embeddings
@@ -50,6 +51,16 @@ app.add_middleware(
 PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
 PINECONE_INDEX_NAME = os.environ.get('PINECONE_INDEX_NAME')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+
+# AI Initialization State Tracking
+class AIStatus:
+    def __init__(self):
+        self.status = "initializing" # initializing, ready, failed
+        self.error = None
+        self.last_ping = None
+        self.start_time = time.time()
+
+ai_status = AIStatus()
 
 # Global variable for the AI workflow
 app_workflow = None
@@ -107,25 +118,29 @@ def save_guest_chat(chat_id, chat_data):
     except Exception as e:
         logger.error(f"Error saving guest chat {chat_id}: {e}")
 
-@app.on_event("startup")
-async def startup_event():
-    global app_workflow
+def initialize_ai():
+    global app_workflow, llm
     try:
         if not PINECONE_API_KEY or not PINECONE_INDEX_NAME or not GROQ_API_KEY:
+            ai_status.status = "failed"
+            ai_status.error = "Core API keys missing in .env"
             logger.warning("Core API keys missing. AI features will not work until .env is configured.")
             return
 
-        logger.info("Initializing MedVeda AI Core components...")
+        logger.info("Background: Initializing MedVeda AI Core components...")
         
-        # 1. Initialize Embeddings & Vector Store
+        # 1. Initialize Embeddings
+        ai_status.status = "loading_embeddings"
         embeddings = download_hugging_face_embeddings()
+        
+        # 2. Connect to Pinecone
+        ai_status.status = "connecting_vectorstore"
         vectorstore = PineconeVectorStore.from_existing_index(
             index_name=PINECONE_INDEX_NAME,
             embedding=embeddings
         )
         retriever = vectorstore.as_retriever(search_kwargs={'k': 3})
 
-        global llm
         llm = ChatGroq(
             model="llama-3.3-70b-versatile",
             temperature=0.7, 
@@ -149,16 +164,30 @@ async def startup_event():
             except Exception as e:
                 return f"Error: {str(e)}"
         
-        global app_workflow
         tools = [medical_tool, web_search]
         app_workflow = create_workflow(llm, tools)
 
-        # Create Database Tables (only User now)
+        ai_status.status = "ready"
+        logger.info(f"AI components initialized successfully in {time.time() - ai_status.start_time:.2f}s")
+    except Exception as e:
+        ai_status.status = "failed"
+        ai_status.error = str(e)
+        logger.error(f"Startup error: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    # Start initialization in a separate thread so the server starts INSTANTLY
+    # This resolves the 10-minute wait on Render by making the server responsive immediately
+    thread = threading.Thread(target=initialize_ai)
+    thread.daemon = True
+    thread.start()
+    
+    # Create Database Tables (only User now) - This is fast and can stay here
+    try:
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables verified.")
-        logger.info("AI components initialized successfully")
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error(f"Database initialization error: {e}")
 
 class ChatRequest(BaseModel):
     message: str
@@ -327,9 +356,17 @@ async def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db))
 
 @app.get("/health")
 async def health():
-    if app_workflow is not None:
-        return {"status": "online", "message": "AI components initialized successfully"}
-    return {"status": "initializing", "message": "AI components still loading or failed"}
+    # Update last ping to track cron-job activity
+    ai_status.last_ping = datetime.utcnow().isoformat()
+    
+    return {
+        "status": "online" if ai_status.status == "ready" else "initializing",
+        "ai_state": ai_status.status,
+        "error": ai_status.error,
+        "uptime_seconds": int(time.time() - ai_status.start_time),
+        "last_ping": ai_status.last_ping,
+        "message": "MedVeda AI is ready" if ai_status.status == "ready" else f"AI is currently: {ai_status.status}"
+    }
 
 if __name__ == "__main__":
     import uvicorn
