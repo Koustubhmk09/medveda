@@ -32,7 +32,7 @@ const App = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [backendStatus, setBackendStatus] = useState('offline'); // online, offline, initializing
+  const [backendStatus, setBackendStatus] = useState('online'); // online, offline, initializing
   const [aiState, setAiState] = useState(null); // loading_embeddings, connecting_vectorstore, etc.
   const [startupError, setStartupError] = useState(null);
   const [openDropdownId, setOpenDropdownId] = useState(null);
@@ -257,7 +257,7 @@ const App = () => {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || backendStatus !== 'online') return;
+    if (!input.trim()) return;
 
     const userInputText = input.trim();
     const userMessage = { role: 'user', text: userInputText };
@@ -482,17 +482,8 @@ const App = () => {
         {/* Header */}
         <header className="h-16 flex items-center justify-between px-8 bg-white/80 backdrop-blur-md border-b border-slate-200 z-10 lg:pl-8 pl-16">
           <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${
-              backendStatus === 'online' ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'
-            }`}></span>
-            <span className="text-sm font-medium text-slate-600">
-              {backendStatus === 'online' ? 'MedVeda Online' : 
-               startupError ? `Error: ${startupError.substring(0, 30)}...` :
-               aiState === 'loading_embeddings' ? 'AI Waking Up... (Loading Models)' :
-               aiState === 'connecting_vectorstore' ? 'AI Waking Up... (Connecting DB)' :
-               aiState === 'waking_up' ? 'AI Waking Up... (Booting Server)' :
-               'AI Waking Up... (Almost Ready)'}
-            </span>
+            <span className="w-2 h-2 rounded-full bg-green-500"></span>
+            <span className="text-sm font-medium text-slate-600">MedVeda Online</span>
           </div>
         </header>
 
@@ -525,10 +516,8 @@ const App = () => {
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    disabled={backendStatus !== 'online'}
-                    placeholder={backendStatus === 'online' ? "Describe your health concern or ask a question..." : 
-                                 startupError ? "AI Error - See banner for details" :
-                                 "AI is waking up, please wait..."}
+                    disabled={false}
+                    placeholder="Describe your health concern or ask a question..."
                     rows={1}
                     className={`w-full py-4 px-6 bg-transparent focus:outline-none text-lg placeholder:text-slate-400 chat-input custom-scrollbar ${backendStatus !== 'online' ? 'opacity-50' : ''}`}
                   />
@@ -609,20 +598,16 @@ const App = () => {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  disabled={backendStatus !== 'online'}
+                  disabled={false}
                   rows={1}
-                    placeholder={
-                      backendStatus === 'online' ? "Ask anything about your health..." : 
-                      startupError ? "AI Error - See banner for details" :
-                      "AI is waking up (Render Cold Start)..."
-                    }
+                  placeholder="Ask anything about your health..."
                   className={`w-full p-4 pr-16 bg-transparent focus:outline-none rounded-2xl transition-all placeholder:text-slate-400 chat-input custom-scrollbar ${
-                    backendStatus !== 'online' ? 'opacity-50 cursor-not-allowed' : ''
+                    ''
                   }`}
                 />
                 <button
                   onClick={handleSend}
-                  disabled={isLoading || !input.trim() || backendStatus !== 'online'}
+                  disabled={isLoading || !input.trim()}
                   className={`
                     absolute right-2 top-2 bottom-2 px-4 rounded-xl flex items-center justify-center transition-all
                     ${isLoading || !input.trim() 
