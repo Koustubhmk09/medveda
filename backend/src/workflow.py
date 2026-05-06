@@ -91,14 +91,14 @@ def create_workflow(llm: ChatGroq, tools: list):
         
         answer = response.content
         
-        # Add dynamic disclaimer based on risk and category
+        # Add dynamic disclaimer based on Principle 5: Safety Logic
         if state["category"] == "MEDICAL":
             if state["risk_level"] == "MEDIUM":
-                disclaimer = "\n\n---\n*Note: This is informational guidance. Please consult a professional for medical concerns.*"
+                disclaimer = "\n\n*Note: Professional medical consultation is advised.*"
                 if disclaimer not in answer:
                     answer += disclaimer
             elif state["risk_level"] == "HIGH":
-                disclaimer = "\n\n---\n*Disclaimer: EMERGENCY SITUATION. I am an AI, not a doctor. Seek immediate medical attention. This information is for educational purposes only.*"
+                disclaimer = "\n\n**WARNING: EMERGENCY SITUATION. Seek immediate medical help. I am an AI, not a doctor.**"
                 if disclaimer not in answer:
                     answer += disclaimer
         
