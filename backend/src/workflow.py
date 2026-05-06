@@ -3,11 +3,12 @@ from typing import TypedDict, Annotated, List, Union
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_groq import ChatGroq
-from src.prompt import classification_prompt, system_prompt, generation_template
+from src.prompt import classification_prompt, system_prompt, generation_template, contextualize_q_system_prompt
 
 class AgentState(TypedDict):
     messages: List[BaseMessage]
     query: str
+    contextualized_query: str
     intent: str
     category: str
     risk_level: str
@@ -22,8 +23,22 @@ def create_workflow(llm: ChatGroq, tools: list):
 
     # --- NODES ---
 
+    def contextualize_node(state: AgentState):
+        """Rewrites the user query to be standalone if there's history."""
+        if not state["messages"]:
+            return {"contextualized_query": state["query"]}
+        
+        messages = [
+            ("system", contextualize_q_system_prompt)
+        ] + state["messages"] + [
+            ("human", state["query"])
+        ]
+        
+        response = llm.invoke(messages)
+        return {"contextualized_query": response.content.strip()}
+
     def classifier_node(state: AgentState):
-        query = state["query"]
+        query = state["contextualized_query"]
         messages = [
             ("system", classification_prompt)
         ] + state["messages"] + [
@@ -46,13 +61,13 @@ def create_workflow(llm: ChatGroq, tools: list):
         if state["category"] == "GENERAL" and state["intent"] == "FACT":
             return {"db_context": "N/A"}
         
-        query = state["query"]
+        query = state["contextualized_query"]
         results = medical_tool.invoke(query)
         return {"db_context": str(results)}
 
     def web_search_node(state: AgentState):
         # Search web for facts or if it's general
-        query = state["query"]
+        query = state["contextualized_query"]
         results = web_tool.invoke(query)
         return {"web_context": str(results)}
 
@@ -63,7 +78,7 @@ def create_workflow(llm: ChatGroq, tools: list):
             db_context=state["db_context"],
             web_context=state["web_context"],
             risk_level=state["risk_level"],
-            query=state["query"]
+            query=state["query"] # Use original query for the final response generation to stay true to user's intent
         )
         
         messages = [
@@ -93,13 +108,15 @@ def create_workflow(llm: ChatGroq, tools: list):
 
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("contextualize", contextualize_node)
     workflow.add_node("classifier", classifier_node)
     workflow.add_node("retriever", retriever_node)
     workflow.add_node("web_search", web_search_node)
     workflow.add_node("generator", generator_node)
 
-    workflow.set_entry_point("classifier")
+    workflow.set_entry_point("contextualize")
     
+    workflow.add_edge("contextualize", "classifier")
     workflow.add_edge("classifier", "retriever")
     workflow.add_edge("retriever", "web_search")
     workflow.add_edge("web_search", "generator")
