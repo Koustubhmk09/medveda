@@ -3,7 +3,7 @@ from typing import TypedDict, Annotated, List, Union
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_groq import ChatGroq
-from src.prompt import classification_prompt, system_prompt, generation_template, contextualize_q_system_prompt
+from .prompt import classification_prompt, system_prompt, generation_template, contextualize_q_system_prompt
 
 class AgentState(TypedDict):
     messages: List[BaseMessage]
