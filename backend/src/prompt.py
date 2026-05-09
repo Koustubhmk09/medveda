@@ -54,3 +54,9 @@ generation_template = (
     "Generate a natural, point-wise response as MedVeda AI. Bold important information."
 )
 
+# --- TITLE GENERATION PROMPT ---
+title_generation_prompt = (
+    "Generate a very short, 2-3 word professional title for a chat conversation based on this first user message: '{query}'.\n"
+    "Return ONLY the title text."
+)
+
