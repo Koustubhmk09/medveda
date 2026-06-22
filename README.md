@@ -75,7 +75,7 @@ conda activate medveda
 pip install -r requirements.txt
 
 # Configure .env
-cp .env.example .env # Add your keys (GROQ, PINECONE, GOOGLE_CLIENT_ID, etc.)
+cp .env.example .env # Add your keys (GROQ_API_KEY, PINECONE, etc.)
 
 # Run server
 python main.py

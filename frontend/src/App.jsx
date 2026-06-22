@@ -1,744 +1,864 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
-import { Send, Bot, User, PlusCircle, MessageSquare, Menu, X, HeartPulse, Trash2, MoreHorizontal, LogOut, LogIn } from 'lucide-react';
+import { 
+  Send, MessageSquare, HeartPulse, LogOut, Search, Stethoscope, 
+  Activity, ClipboardList, Plus, UserCheck, 
+  AlertCircle, Eye, EyeOff, ArrowLeft, MoreVertical, Trash2
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useGoogleLogin } from '@react-oauth/google';
-import { Dialog } from 'primereact/dialog';
-import { Button } from 'primereact/button';
 import './App.css';
-
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Session-only storage: cleared when the browser tab is closed
+const SESSION_TOKEN_KEY = 'medveda_token';
+const SESSION_DOCTOR_KEY = 'medveda_doctor';
+
+const clearAuthSession = () => {
+  sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  sessionStorage.removeItem(SESSION_DOCTOR_KEY);
+  localStorage.removeItem(SESSION_TOKEN_KEY);
+  localStorage.removeItem(SESSION_DOCTOR_KEY);
+};
+
 const App = () => {
-  // State Management for Chats
-  const [chats, setChats] = useState(() => {
-    const saved = localStorage.getItem('medveda_chats');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error('Failed to parse chats', e); }
-    }
-    return [{ id: Date.now().toString(), title: 'New chat', messages: [] }];
-  });
 
-  const [activeChatId, setActiveChatId] = useState(() => {
-    const saved = localStorage.getItem('medveda_active_chat');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) {}
-    }
-    return null;
-  });
-
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [backendStatus, setBackendStatus] = useState('online'); // online, offline, initializing
-  const [aiState, setAiState] = useState(null); // loading_embeddings, connecting_vectorstore, etc.
-  const [startupError, setStartupError] = useState(null);
-  const [openDropdownId, setOpenDropdownId] = useState(null);
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('medveda_user');
+  // Authentication & Session States (tab session only — not restored after close)
+  const [token, setToken] = useState(() => sessionStorage.getItem(SESSION_TOKEN_KEY));
+  const [doctor, setDoctor] = useState(() => {
+    const saved = sessionStorage.getItem(SESSION_DOCTOR_KEY);
     return saved ? JSON.parse(saved) : null;
   });
-  const [isLoginVisible, setIsLoginVisible] = useState(false);
-  const [isLogoutVisible, setIsLogoutVisible] = useState(false);
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  // Doctor Auth Form States
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authSpecialty, setAuthSpecialty] = useState('Normal patients checking doctor');
+  const [authLicense, setAuthLicense] = useState('');
+  const [authHospital, setAuthHospital] = useState('My Clinic');
+  const [authError, setAuthError] = useState(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [registrationSuccess, setRegistrationSuccess] = useState(false);
+
+  // Dashboard & Patient Queue States
+  const [patients, setPatients] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLoadingPatients, setIsLoadingPatients] = useState(false);
+  const [activePatient, setActivePatient] = useState(null);
+  const [backendStatus, setBackendStatus] = useState('online');
+  const [openMenuChatId, setOpenMenuChatId] = useState(null);
+
+  // AI Chat States
+  const [doctorChats, setDoctorChats] = useState([]);
+  const [activeChatId, setActiveChatId] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
   const messagesEndRef = useRef(null);
 
-  // Sync user to localStorage
+  // Drop legacy persistent login from older builds
   useEffect(() => {
-    if (user) {
-      localStorage.setItem('medveda_user', JSON.stringify(user));
-    } else {
-      localStorage.removeItem('medveda_user');
-    }
-  }, [user]);
-
-  const googleLogin = useGoogleLogin({
-    onSuccess: async (tokenResponse) => {
-      // Show loading sequence immediately for responsiveness
-      setIsLoginVisible(false);
-      setIsLoggingIn(true);
-      
-      const tryLogin = async (retries = 3) => {
-        try {
-          const res = await axios.post(`${API_URL}/auth/google`, {
-            token: tokenResponse.access_token,
-          }, { timeout: 15000 }); // Longer timeout for cold starts
-          
-          setTimeout(() => {
-            setUser(res.data.user);
-            localStorage.setItem('medveda_token', res.data.access_token);
-            setIsLoggingIn(false);
-          }, 1500);
-        } catch (err) {
-          if (retries > 0) {
-            console.log(`Login attempt failed, retrying... (${retries} left)`);
-            setTimeout(() => tryLogin(retries - 1), 3000);
-          } else {
-            console.error('Login failed after retries', err);
-            setIsLoggingIn(false);
-            alert('The AI is currently waking up on Render. Please wait a few seconds and try logging in again.');
-          }
-        }
-      };
-
-      tryLogin();
-    },
-    onError: () => {
-      console.log('Login Failed');
-      setIsLoginVisible(false);
-    },
-  });
-
-  const handleLogout = () => {
-    setIsLogoutVisible(true);
-  };
-
-  const confirmLogout = () => {
-    setUser(null);
-    localStorage.removeItem('medveda_token');
-    localStorage.removeItem('medveda_user');
-    setChats([{ id: Date.now().toString(), title: 'New chat', messages: [] }]);
-    setActiveChatId(null);
-    setIsLogoutVisible(false);
-  };
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = () => setOpenDropdownId(null);
-    document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+    localStorage.removeItem(SESSION_DOCTOR_KEY);
   }, []);
 
-  // Sync state to localStorage (Only for logged in users)
   useEffect(() => {
-    if (user) {
-      localStorage.setItem('medveda_chats', JSON.stringify(chats));
-      localStorage.setItem('medveda_active_chat', JSON.stringify(activeChatId));
+    if (token) {
+      sessionStorage.setItem(SESSION_TOKEN_KEY, token);
     } else {
-      // Guest mode is ephemeral: don't persist to localStorage
-      localStorage.removeItem('medveda_chats');
-      localStorage.removeItem('medveda_active_chat');
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
     }
-  }, [chats, user, activeChatId]);
+  }, [token]);
 
-  // Derived current chat
-  const activeChat = activeChatId ? (chats.find(c => c.id === activeChatId) || {}) : {};
-  const messages = activeChat.messages || [];
+  useEffect(() => {
+    if (doctor) {
+      sessionStorage.setItem(SESSION_DOCTOR_KEY, JSON.stringify(doctor));
+    } else {
+      sessionStorage.removeItem(SESSION_DOCTOR_KEY);
+    }
+  }, [doctor]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  const checkHealth = async () => {
+  // Fetch Patients Queue & Doctor Chats
+  const fetchQueueAndChats = async () => {
+    if (!token) return;
+    setIsLoadingPatients(true);
     try {
-      const res = await axios.get(`${API_URL}/health`, { timeout: 5000 });
-      setBackendStatus(res.data.status);
-      setAiState(res.data.ai_state);
-      setStartupError(res.data.error);
-      return res.data.status === 'online';
+      const headers = { Authorization: `Bearer ${token}` };
+      
+      // Fetch Patients
+      const patientRes = await axios.get(`${API_URL}/patients`, { headers });
+      setPatients(patientRes.data);
+
+      // Fetch Chats
+      const chatRes = await axios.get(`${API_URL}/chats`, { headers });
+      setDoctorChats(chatRes.data);
+      
+      setBackendStatus('online');
     } catch (err) {
-      // If the backend is completely unreachable (Render cold start), 
-      // we show 'initializing' instead of 'offline' to reduce user anxiety.
-      setBackendStatus('initializing');
-      setAiState('waking_up');
-      return false;
+      console.error('Failed to load portal data:', err);
+      if (err.response?.status === 401) {
+        handleLogout();
+      } else {
+        setBackendStatus('offline');
+      }
+    } finally {
+      setIsLoadingPatients(false);
     }
   };
 
-  // Poll for health if not online (Handles Render cold start)
   useEffect(() => {
-    checkHealth();
-    const interval = setInterval(() => {
-      if (backendStatus !== 'online') {
-        checkHealth();
-      }
-    }, 4000); // Check every 4 seconds if not online
-    return () => clearInterval(interval);
-  }, [backendStatus]);
+    if (token) {
+      fetchQueueAndChats();
+    }
+  }, [token]);
 
-  // Fetch chats from backend if user is logged in
+  // Scroll to bottom of chat
   useEffect(() => {
-    const fetchChats = async () => {
-      const token = localStorage.getItem('medveda_token');
-      if (user && token) {
-        try {
-          const res = await axios.get(`${API_URL}/chats`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (res.data.length > 0) {
-            setChats(res.data.map(c => ({ 
-              ...c, 
-              messages: c.messages ? c.messages.map(m => ({ role: m.role, text: m.content })) : [] 
-            })));
-          } else {
-            // Reset to default if no chats found (e.g. after table drop)
-            setChats([{ id: Date.now().toString(), title: 'New chat', messages: [] }]);
-          }
-          setActiveChatId(null); // Always show Hero page on login
-        } catch (err) {
-          console.error('Failed to fetch chats', err);
-        }
-      }
-    };
-    fetchChats();
-  }, [user]);
-
-  // Fetch messages for active chat if not loaded
-  useEffect(() => {
-    const fetchMessages = async () => {
-      const token = localStorage.getItem('medveda_token');
-      if (user && token && activeChatId) {
-        const currentChat = chats.find(c => c.id === activeChatId);
-        if (currentChat && (!currentChat.messages || currentChat.messages.length === 0)) {
-          try {
-            const res = await axios.get(`${API_URL}/chats/${activeChatId}`, {
-              headers: { Authorization: `Bearer ${token}` }
-            });
-            setChats(prev => prev.map(c => 
-              c.id === activeChatId ? { ...c, messages: res.data.messages.map(m => ({ role: m.role, text: m.content })) } : c
-            ));
-          } catch (err) {
-            console.error('Failed to fetch messages', err);
-          }
-        }
-      }
-    };
-    fetchMessages();
-  }, [activeChatId, user]);
-
-  useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const toggleDropdown = (e, id) => {
-    e.stopPropagation();
-    setOpenDropdownId(prev => prev === id ? null : id);
-  };
-
-  const createNewChat = () => {
-    setActiveChatId(null);
-    if (window.innerWidth < 1024) setIsSidebarOpen(false);
-  };
-
-  const deleteChat = async (e, id) => {
-    e.stopPropagation();
-    const token = localStorage.getItem('medveda_token');
-    if (user && token) {
+  // Load chat session if activeChatId changes
+  useEffect(() => {
+    const loadChatSession = async () => {
+      if (!activeChatId || !token) return;
+      setIsLoadingHistory(true);
       try {
-        await axios.delete(`${API_URL}/chats/${id}`, {
+        const res = await axios.get(`${API_URL}/chats/${activeChatId}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        const loadedMsgs = res.data.messages.map(m => ({
+          role: m.role,
+          text: m.content
+        }));
+        setMessages(loadedMsgs);
       } catch (err) {
-        console.error('Failed to delete chat on backend', err);
+        console.error('Failed to fetch chat history:', err);
+      } finally {
+        setIsLoadingHistory(false);
       }
-    }
-    
-    const updatedChats = chats.filter(c => c.id !== id);
-    if (updatedChats.length === 0) {
-      const newChat = { id: Date.now().toString(), title: 'New chat', messages: [] };
-      setChats([newChat]);
-      setActiveChatId(newChat.id);
-    } else {
-      setChats(updatedChats);
-      if (activeChatId === id) {
-        setActiveChatId(null);
-      }
-    }
-  };
+    };
+    loadChatSession();
+  }, [activeChatId]);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
-
-    const userInputText = input.trim();
-    const userMessage = { role: 'user', text: userInputText };
-    
-    // Detect if we're starting a brand new chat session
-    const isNewChat = !activeChatId;
-    const tempChatId = isNewChat ? Date.now().toString() : activeChatId;
-
-    if (isNewChat) {
-      // For a new chat, we prepend a fresh chat object immediately
-      const newChat = {
-        id: tempChatId,
-        title: userInputText.length > 25 ? userInputText.substring(0, 25) + '...' : userInputText,
-        messages: [userMessage]
-      };
-      setChats(prev => [newChat, ...prev]);
-      setActiveChatId(tempChatId);
-    } else {
-      // For existing chat, we just append the message to current chat
-      setChats(prevChats => prevChats.map(chat => {
-        if (chat.id === activeChatId) {
-          return {
-            ...chat,
-            messages: [...chat.messages, userMessage]
-          };
-        }
-        return chat;
-      }));
+  // Handle Doctor Login
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthError('Please enter email and password.');
+      return;
     }
-    
-    setInput('');
-    setIsLoading(true);
+    setAuthLoading(true);
+    setAuthError(null);
 
     try {
-      const token = localStorage.getItem('medveda_token');
-      const response = await axios.post(`${API_URL}/chat`, {
-        message: userInputText,
-        chat_id: isNewChat ? null : String(activeChatId)
-      }, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      const res = await axios.post(`${API_URL}/auth/doctor/login`, {
+        email: authEmail,
+        password: authPassword
       });
-      
-      const botMessage = { role: 'assistant', text: response.data.answer };
-      const newTitle = response.data.title;
-      // Handle missing chat_id for guests (don't set to "undefined")
-      const newChatIdFromBackend = response.data.chat_id ? String(response.data.chat_id) : null;
-      
-      setChats(prevChats => prevChats.map(chat => {
-        if (chat.id === tempChatId) {
-          return {
-            ...chat,
-            id: newChatIdFromBackend || chat.id,
-            title: newTitle || chat.title,
-            messages: [...chat.messages, botMessage]
-          };
-        }
-        return chat;
-      }));
-      
-      // Only update activeChatId if the backend actually provided a persistent ID
-      if (newChatIdFromBackend) {
-        setActiveChatId(newChatIdFromBackend);
-      }
-    } catch (error) {
-      console.error('Error sending message:', error);
-      const errorDetail = error.response?.data?.detail;
-      const errorMessageText = typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : (errorDetail || error.message);
-      const errorMessage = { 
-        role: 'assistant', 
-        text: `Error: ${errorMessageText}. Please make sure the backend terminal shows "AI components initialized successfully".` 
-      };
-      
-      setChats(prevChats => prevChats.map(chat => {
-        if (chat.id === tempChatId) {
-          return {
-            ...chat,
-            messages: [...chat.messages, errorMessage]
-          };
-        }
-        return chat;
-      }));
+      setToken(res.data.access_token);
+      setDoctor(res.data.user);
+      setAuthPassword('');
+    } catch (err) {
+      console.error('Login error:', err);
+      setAuthError(err.response?.data?.detail || 'Invalid email or password.');
     } finally {
-      setIsLoading(false);
+      setAuthLoading(false);
     }
   };
 
-  return (
-    <div className="flex h-screen w-full bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {/* Mobile Sidebar Toggle */}
-      <button 
-        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-        className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-white rounded-md shadow-md"
+  // Handle Doctor Registration
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    if (!authName || !authEmail || !authPassword || !authLicense) {
+      setAuthError('Please fill in all required fields.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      await axios.post(`${API_URL}/auth/doctor/register`, {
+        full_name: authName,
+        email: authEmail,
+        password: authPassword,
+        specialty: authSpecialty,
+        license_number: authLicense,
+        hospital_name: authHospital
+      });
+
+      // Show success popup then redirect to login with all fields cleared
+      setRegistrationSuccess(true);
+      setTimeout(() => {
+        setRegistrationSuccess(false);
+        setAuthName('');
+        setAuthEmail('');
+        setAuthPassword('');
+        setAuthSpecialty('Normal patients checking doctor');
+        setAuthLicense('');
+        setAuthHospital('My Clinic');
+        setAuthError(null);
+        setShowPassword(false);
+        setIsRegisterMode(false);
+      }, 2000);
+    } catch (err) {
+      console.error('Registration error:', err);
+      setAuthError(err.response?.data?.detail || 'Registration failed. Email may already be in use.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const resetAuthForm = () => {
+    setAuthEmail('');
+    setAuthPassword('');
+    setAuthName('');
+    setAuthSpecialty('Normal patients checking doctor');
+    setAuthLicense('');
+    setAuthHospital('My Clinic');
+    setAuthError(null);
+    setShowPassword(false);
+    setIsRegisterMode(false);
+    setRegistrationSuccess(false);
+  };
+
+  // Handle Logout
+  const handleLogout = () => {
+    setToken(null);
+    setDoctor(null);
+    setActivePatient(null);
+    setActiveChatId(null);
+    setPatients([]);
+    setDoctorChats([]);
+    setMessages([]);
+    setChatInput('');
+    setSearchQuery('');
+    setOpenMenuChatId(null);
+    resetAuthForm();
+    clearAuthSession();
+  };
+
+  // Send message to MedVeda Clinical AI
+  const handleSendMessage = async (e) => {
+    e?.preventDefault();
+    if (!chatInput.trim() || !activePatient || isSendingMessage) return;
+
+    const userMessageText = chatInput.trim();
+    const newUserMessage = { role: 'user', text: userMessageText };
+    
+    setMessages(prev => [...prev, newUserMessage]);
+    setChatInput('');
+    setIsSendingMessage(true);
+
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await axios.post(`${API_URL}/chat`, {
+        message: userMessageText,
+        chat_id: activeChatId,
+        patient_id: activePatient.patient_id
+      }, { headers });
+
+      const assistantMsg = { role: 'assistant', text: res.data.answer };
+      setMessages(prev => [...prev, assistantMsg]);
+      
+      // If a new chat session was generated, update states and sync sidebar list
+      if (!activeChatId) {
+        setActiveChatId(res.data.chat_id);
+        const chatListRes = await axios.get(`${API_URL}/chats`, { headers });
+        setDoctorChats(chatListRes.data);
+      }
+    } catch (err) {
+      console.error('Chat error:', err);
+      setMessages(prev => [...prev, { role: 'assistant', text: '**Error:** Failed to connect to MedVeda AI server. Please try again.' }]);
+    } finally {
+      setIsSendingMessage(false);
+    }
+  };
+
+  const startNewChat = () => {
+    setActiveChatId(null);
+    setMessages([]);
+    setOpenMenuChatId(null);
+  };
+
+  const openPatientWorkspace = (patient) => {
+    setActivePatient(patient);
+    startNewChat();
+  };
+
+  const handleDeleteChat = async (chatId, e) => {
+    e?.stopPropagation();
+    if (!token) return;
+    try {
+      await axios.delete(`${API_URL}/chats/${chatId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setDoctorChats(prev => prev.filter(c => c.id !== chatId));
+      if (activeChatId === chatId) startNewChat();
+      setOpenMenuChatId(null);
+    } catch (err) {
+      console.error('Failed to delete chat:', err);
+    }
+  };
+
+  const parsePatientNum = (id) => parseInt(String(id).replace(/\D/g, ''), 10) || 0;
+
+  const filteredPatients = patients
+    .filter(p =>
+      p.full_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      p.patient_id.toLowerCase().includes(searchQuery.toLowerCase())
+    )
+    .sort((a, b) => parsePatientNum(a.patient_id) - parsePatientNum(b.patient_id));
+
+  // Filter chats specifically for the active patient
+  const activePatientChats = activePatient 
+    ? doctorChats.filter(c => c.patient_id === activePatient.patient_id)
+    : [];
+
+  const isChatEmpty = messages.length === 0 && !isLoadingHistory;
+
+  const renderChatInput = () => (
+    <form
+      onSubmit={handleSendMessage}
+      className="w-full max-w-2xl flex items-center gap-3 bg-white border border-slate-200 rounded-3xl px-5 py-3 shadow-lg focus-within:border-sky-400 focus-within:ring-2 focus-within:ring-sky-100 transition-all"
+    >
+      <textarea
+        rows={1}
+        placeholder="Describe your health concern or ask a question..."
+        value={chatInput}
+        onChange={e => setChatInput(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSendMessage();
+          }
+        }}
+        className="flex-1 bg-transparent border-none text-sm leading-normal focus:outline-none resize-none py-1 text-slate-900 placeholder:text-slate-400"
+        style={{ minHeight: '24px', maxHeight: '120px' }}
+      />
+      <button
+        type="submit"
+        disabled={isSendingMessage || !chatInput.trim()}
+        className="w-9 h-9 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shrink-0 disabled:opacity-40 cursor-pointer transition-colors"
       >
-        {isSidebarOpen ? <X size={20} /> : <Menu size={20} />}
+        <Send size={16} />
       </button>
+    </form>
+  );
 
-      {/* Sidebar */}
-      <aside className={`
-        fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-slate-200 transform transition-transform duration-300 ease-in-out
-        lg:translate-x-0 lg:static lg:inset-0 flex flex-col
-        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
-        <div className="flex flex-col h-full p-4">
-          <div className="flex items-center gap-2 px-2 py-4 mb-4">
-            <div className="p-2 bg-medical-500 rounded-lg text-white">
-              <HeartPulse size={24} />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-800">MedVeda AI</h1>
-          </div>
-
-          <button 
-            onClick={createNewChat}
-            className="flex items-center gap-2 w-full p-3 mb-6 text-sm font-medium text-white bg-medical-600 rounded-xl hover:bg-medical-700 transition-colors shadow-sm"
-          >
-            <PlusCircle size={18} />
-            New chat
-          </button>
-
-          <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
-            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 px-2">History</div>
-            {chats.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-32 px-4 text-center">
-                <MessageSquare size={24} className="text-slate-200 mb-2" />
-                <p className="text-xs text-slate-300">New conversations will appear here.</p>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {chats
-                  .filter(chat => chat.title !== 'New chat' || (chat.messages && chat.messages.length > 0))
-                  .map(chat => (
-                  <div 
-                    key={chat.id}
-                    onClick={() => {
-                      setActiveChatId(chat.id);
-                      if (window.innerWidth < 1024) setIsSidebarOpen(false);
-                    }}
-                    className={`flex items-center justify-between p-2.5 rounded-lg cursor-pointer transition-colors group ${
-                      activeChatId === chat.id ? 'bg-medical-50 text-medical-700 font-medium' : 'text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 overflow-hidden">
-                      <MessageSquare size={16} className={activeChatId === chat.id ? 'text-medical-500' : 'text-slate-400'} />
-                      <span className="text-sm truncate w-36">{chat.title}</span>
-                    </div>
-                    <div className="relative">
-                      <button 
-                        onClick={(e) => toggleDropdown(e, chat.id)}
-                        className={`p-1.5 rounded transition-opacity text-slate-400 hover:bg-slate-200 ${
-                          activeChatId === chat.id || openDropdownId === chat.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-                        }`}
-                        title="More options"
-                      >
-                        <MoreHorizontal size={16} />
-                      </button>
-                      
-                      <AnimatePresence>
-                        {openDropdownId === chat.id && (
-                          <motion.div 
-                            initial={{ opacity: 0, scale: 0.95 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.95 }}
-                            transition={{ duration: 0.1 }}
-                            className="absolute right-0 top-full mt-1 w-40 bg-white border border-slate-100 shadow-xl rounded-xl z-50 overflow-hidden text-sm"
-                          >
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); deleteChat(e, chat.id); setOpenDropdownId(null); }}
-                              className="flex items-center gap-2 w-full p-2.5 text-left text-red-600 hover:bg-red-50 transition-colors"
-                            >
-                              <Trash2 size={14} /> Delete
-                            </button>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-auto pt-4 border-t border-slate-100">
-            {user ? (
-              <div className="flex items-center justify-between gap-3 px-2">
-                <div className="flex items-center gap-3 overflow-hidden">
-                  <div className="w-9 h-9 rounded-full bg-medical-500 flex items-center justify-center text-white font-bold shrink-0 shadow-sm">
-                    {user.full_name?.charAt(0) || user.email?.charAt(0)}
-                  </div>
-                  <div className="flex flex-col overflow-hidden">
-                    <span className="text-sm font-semibold text-slate-800 truncate">{user.full_name}</span>
-                    <span className="text-[11px] text-slate-400 truncate">{user.email}</span>
-                  </div>
-                </div>
-                <button 
-                  onClick={handleLogout}
-                  className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                  title="Logout"
+  return (
+    <div className="min-h-screen w-full relative">
+          
+          {/* SECURE SECURE BLUR OVERLAY FOR LOGOUT */}
+          <AnimatePresence>
+            {showLogoutModal && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/40 backdrop-blur-md"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white border border-slate-200 rounded-3xl p-8 shadow-2xl max-w-sm w-full mx-4 flex flex-col items-center text-center"
                 >
-                  <LogOut size={16} />
-                </button>
-              </div>
-            ) : (
-              <button 
-                onClick={() => setIsLoginVisible(true)}
-                className="flex items-center gap-3 w-full p-2 text-sm font-medium text-slate-700 hover:bg-medical-50 rounded-xl transition-all border border-slate-100 hover:border-medical-200 group"
-              >
-                <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 group-hover:bg-medical-100 group-hover:text-medical-600 transition-colors shrink-0">
-                  <User size={20} />
-                </div>
-                <div className="flex flex-col items-start overflow-hidden">
-                  <span className="font-bold text-slate-800">Log in</span>
-                  <span className="text-[10px] text-slate-400 truncate">Sync your history</span>
-                </div>
-                <LogIn size={16} className="ml-auto text-slate-300 group-hover:text-medical-500 group-hover:translate-x-0.5 transition-all" />
-              </button>
-            )}
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col h-full bg-slate-50 relative">
-        {/* Header */}
-        <header className="h-16 flex items-center justify-between px-8 bg-white/80 backdrop-blur-md border-b border-slate-200 z-10 lg:pl-8 pl-16">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-green-500"></span>
-            <span className="text-sm font-medium text-slate-600">MedVeda Online</span>
-          </div>
-        </header>
-
-        {/* Messages or Hero */}
-        <div className="flex-1 overflow-y-auto p-4 lg:p-8 custom-scrollbar">
-          {!activeChatId || messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center max-w-3xl mx-auto text-center px-4">
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="mb-8"
-              >
-                <div className="w-20 h-20 bg-medical-500 rounded-3xl flex items-center justify-center text-white shadow-2xl shadow-medical-200 mx-auto mb-6">
-                  <HeartPulse size={40} />
-                </div>
-                <h2 className="text-5xl font-bold text-slate-900 mb-6 tracking-tight">What can I help you with?</h2>
-                <p className="text-slate-500 text-xl max-w-2xl mx-auto leading-relaxed">
-                  Your personal AI medical assistant for health guidance.
-                </p>
+                  <div className="w-14 h-14 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mb-4">
+                    <LogOut size={28} />
+                  </div>
+                  <h3 className="text-lg font-bold text-slate-900">End Clinical Session?</h3>
+                  <p className="text-xs text-slate-500 mt-2 mb-6">
+                    You will be logged out of MedVeda AI portal. All active sessions will be securely stored.
+                  </p>
+                  <div className="flex gap-3 w-full">
+                    <button
+                      type="button"
+                      onClick={() => setShowLogoutModal(false)}
+                      className="flex-1 border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold py-3 rounded-xl text-xs transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { handleLogout(); setShowLogoutModal(false); }}
+                      className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-xl text-xs transition-all cursor-pointer active:scale-98"
+                    >
+                      Logout Session
+                    </button>
+                  </div>
+                </motion.div>
               </motion.div>
+            )}
+          </AnimatePresence>
 
+          {/* DOCTOR AUTHENTICATION / LANDING WALL */}
+          {!token ? (
+            <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 text-slate-900 font-sans p-4 relative overflow-hidden">
+              <div className="absolute inset-0 bg-[radial-gradient(#e2e8f0_1px,transparent_1px)] [background-size:16px_16px] opacity-70" />
+              
               <motion.div 
-                initial={{ opacity: 0, y: 20 }}
+                initial={{ opacity: 0, y: 30 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="w-full max-w-2xl mt-8"
+                className="w-full max-w-[480px] bg-white border border-slate-200 rounded-3xl p-8 shadow-xl relative z-10"
               >
-                <div className="relative group shadow-2xl shadow-medical-100 rounded-3xl border border-slate-200 bg-white p-2 transition-all hover:border-medical-300">
-                  <textarea
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    disabled={false}
-                    placeholder="Describe your health concern or ask a question..."
-                    rows={1}
-                    className={`w-full py-4 px-6 bg-transparent focus:outline-none text-lg placeholder:text-slate-400 chat-input custom-scrollbar ${backendStatus !== 'online' ? 'opacity-50' : ''}`}
-                  />
-                  <button
-                    onClick={handleSend}
-                    disabled={isLoading || !input.trim() || backendStatus !== 'online'}
-                    className={`
-                      absolute right-3 top-3 bottom-3 px-6 rounded-2xl flex items-center justify-center transition-all
-                      ${isLoading || !input.trim() || backendStatus !== 'online'
-                        ? 'bg-slate-100 text-slate-300 pointer-events-none' 
-                        : 'bg-medical-600 text-white hover:bg-medical-700 shadow-md active:scale-95'}
-                    `}
+                <div className="flex flex-col items-center mb-6">
+                  <div className="w-14 h-14 bg-cyan-50 border border-cyan-100 rounded-2xl flex items-center justify-center text-cyan-600 mb-4 shadow-sm">
+                    <HeartPulse size={30} className="animate-pulse" />
+                  </div>
+                  <h1 className="text-3xl font-extrabold tracking-tight text-slate-900">MedVeda AI</h1>
+                  <p className="text-xs text-slate-500 mt-1">Clinical AI Diagnostics & Triage Hub</p>
+                </div>
+
+                {/* Login/Register Toggle Header */}
+                <div className="flex bg-slate-50 border border-slate-100 p-1.5 rounded-2xl mb-6">
+                  <button 
+                    onClick={() => { setIsRegisterMode(false); setAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${!isRegisterMode ? 'bg-white text-cyan-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
                   >
-                    <Send size={20} />
+                    Doctor Login
+                  </button>
+                  <button 
+                    onClick={() => { setIsRegisterMode(true); setAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${isRegisterMode ? 'bg-white text-cyan-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                  >
+                    Doctor Registration
                   </button>
                 </div>
+
+                <form onSubmit={isRegisterMode ? handleRegister : handleLogin} className="space-y-4" autoComplete="off">
+                  
+                  {/* Registration success popup inside form */}
+                  <AnimatePresence>
+                    {registrationSuccess && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center"
+                      >
+                        <span className="text-xs font-bold text-emerald-700">🎉 Registration Successful! Redirecting to login...</span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {isRegisterMode && (
+                    <>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Full Name</label>
+                        <input 
+                          type="text" 
+                          required
+                          placeholder="Enter your full name"
+                          value={authName}
+                          onChange={e => setAuthName(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 text-xs focus:outline-none transition-all text-slate-900"
+                        />
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">MCI License Number</label>
+                          <input 
+                            type="text" 
+                            required
+                            placeholder="Enter MCI number"
+                            value={authLicense}
+                            onChange={e => setAuthLicense(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 text-xs focus:outline-none transition-all text-slate-900"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Hospital / Clinic</label>
+                          <input 
+                            type="text" 
+                            required
+                            placeholder="Enter hospital name"
+                            value={authHospital}
+                            onChange={e => setAuthHospital(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 text-xs focus:outline-none transition-all text-slate-900"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Specialization Required</label>
+                        <select
+                          value={authSpecialty}
+                          onChange={e => setAuthSpecialty(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 text-xs focus:outline-none transition-all text-slate-900 cursor-pointer"
+                        >
+                          <option value="General Practitioner">🏥 General Practitioner (GP)</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Email Address</label>
+                    <input 
+                      type="email" 
+                      required
+                      placeholder="Enter your email"
+                      value={authEmail}
+                      onChange={e => setAuthEmail(e.target.value)}
+                      autoComplete="off"
+                      name="medveda-login-email"
+                      className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 text-xs focus:outline-none transition-all text-slate-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Password</label>
+                    <div className="relative">
+                      <input 
+                        type={showPassword ? "text" : "password"} 
+                        required
+                        placeholder="Enter your password"
+                        value={authPassword}
+                        onChange={e => setAuthPassword(e.target.value)}
+                        autoComplete="new-password"
+                        name="medveda-login-password"
+                        className="w-full bg-slate-50 border border-slate-200 focus:border-cyan-500 focus:bg-white rounded-xl px-4 py-3 pr-10 text-xs focus:outline-none transition-all text-slate-900"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer"
+                      >
+                        {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {authError && (
+                    <motion.div 
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-600 p-3.5 rounded-xl text-xs animate-fade-in"
+                    >
+                      <AlertCircle size={15} className="shrink-0 mt-0.5" />
+                      <span>{authError}</span>
+                    </motion.div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3.5 rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-55"
+                  >
+                    {authLoading ? (
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    ) : isRegisterMode ? 'Register Account' : 'Login Workspace'}
+                  </button>
+                </form>
               </motion.div>
             </div>
           ) : (
-            <div className="max-w-3xl mx-auto space-y-6 pb-24">
-              <AnimatePresence initial={false}>
-                {messages.map((msg, idx) => (
-                  <motion.div
-                    key={idx}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            
+            /* DOCTOR MAIN PANEL (LOGGED IN WORKSPACE) */
+            <div className="h-screen w-full flex bg-slate-50 text-slate-900 font-sans overflow-hidden">
+              <AnimatePresence mode="wait">
+                
+                {/* CASE 1: NO ACTIVE PATIENT -> GENERAL CONTROL WORKSPACE */}
+                {!activePatient ? (
+                  <motion.div 
+                    key="workstation"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="flex-1 flex flex-col h-full overflow-hidden px-6 py-5 md:px-10 md:py-6"
                   >
-                    <div className={`flex gap-3 max-w-[85%] lg:max-w-[75%] ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                      <div className={`
-                        w-8 h-8 rounded-lg flex-shrink-0 flex items-center justify-center
-                        ${msg.role === 'user' ? 'bg-medical-100 text-medical-600' : 'bg-medical-500 text-white shadow-md'}
-                      `}>
-                        {msg.role === 'user' ? <User size={18} /> : <HeartPulse size={18} />}
+                    {/* Minimal top bar */}
+                    <div className="flex items-center justify-between mb-5 shrink-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${backendStatus === 'online' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                        <span className="text-sm font-semibold text-slate-600">MedVeda-AI online</span>
                       </div>
-                      <div className={`
-                        p-4 rounded-2xl text-sm leading-relaxed
-                        ${msg.role === 'user' 
-                          ? 'bg-medical-600 text-white rounded-tr-none shadow-md whitespace-pre-wrap' 
-                          : 'bg-white text-slate-800 rounded-tl-none border border-slate-100 shadow-md markdown-body'}
-                      `}>
-                        {msg.role === 'user' ? (
-                          msg.text
+                      <button
+                        type="button"
+                        onClick={() => setShowLogoutModal(true)}
+                        className="flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-rose-600 transition-colors cursor-pointer"
+                      >
+                        <LogOut size={16} /> Logout
+                      </button>
+                    </div>
+
+                    {/* Centered KPI cards */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 shrink-0">
+                      <div className="bg-white border border-slate-200/80 rounded-3xl p-6 shadow-sm flex flex-col items-center text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-sky-50 flex items-center justify-center text-sky-600 mb-3">
+                          <Stethoscope size={26} strokeWidth={2} />
+                        </div>
+                        <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Clinician Profile</h4>
+                        <p className="text-lg font-bold text-slate-900">{doctor.full_name}</p>
+                        <span className="text-xs text-sky-700 bg-sky-50 font-semibold px-3 py-1 rounded-full mt-2">
+                          {doctor.specialty}
+                        </span>
+                      </div>
+
+                      <div className="bg-white border border-slate-200/80 rounded-3xl p-6 shadow-sm flex flex-col items-center text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-slate-50 flex items-center justify-center text-slate-600 mb-3">
+                          <UserCheck size={26} strokeWidth={2} />
+                        </div>
+                        <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">License Verification</h4>
+                        <p className="text-base font-bold text-slate-800">MCI No: {doctor.license_number || 'N/A'}</p>
+                        <p className="text-xs text-slate-500 mt-1">{doctor.hospital_name || 'City Hospital'}</p>
+                      </div>
+
+                      <div className="bg-white border border-slate-200/80 rounded-3xl p-6 shadow-sm flex flex-col items-center text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-600 mb-3">
+                          <Activity size={26} strokeWidth={2} />
+                        </div>
+                        <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Specialty Queue</h4>
+                        <p className="text-base font-bold text-slate-800">
+                          {patients.length} Active {patients.length === 1 ? 'Patient' : 'Patients'}
+                        </p>
+                        <p className="text-xs text-emerald-600 font-semibold mt-1">Smart filtered queue</p>
+                      </div>
+                    </div>
+
+                    {/* Patient list */}
+                    <div className="flex-1 bg-white border border-slate-200/80 rounded-3xl shadow-sm flex flex-col min-h-0 overflow-hidden">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-5 py-4 border-b border-slate-100 shrink-0">
+                        <div>
+                          <h3 className="text-lg font-bold text-slate-900">Patient Queue Worklist</h3>
+                          <p className="text-sm text-slate-500 mt-0.5">Open a workspace to start clinical consultation</p>
+                        </div>
+                        <div className="relative w-full sm:w-72">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                          <input 
+                            type="text" 
+                            placeholder="Search by patient ID or name..." 
+                            value={searchQuery}
+                            onChange={e => setSearchQuery(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 transition-all"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto custom-scrollbar">
+                        {isLoadingPatients ? (
+                          <div className="h-48 flex flex-col items-center justify-center text-slate-400">
+                            <div className="w-8 h-8 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mb-3" />
+                            <span className="text-sm">Loading patient queue...</span>
+                          </div>
+                        ) : filteredPatients.length === 0 ? (
+                          <div className="h-48 flex flex-col items-center justify-center text-slate-400">
+                            <ClipboardList size={36} className="text-slate-300 mb-2" />
+                            <p className="text-sm font-medium text-slate-600">No matching patients found</p>
+                          </div>
                         ) : (
-                          <ReactMarkdown>{msg.text}</ReactMarkdown>
+                          <div className="w-full px-5 md:px-6 py-2">
+                            <div className="grid grid-cols-[minmax(72px,auto)_1fr_auto] items-center gap-4 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-3 mb-1">
+                              <span>Patient ID</span>
+                              <span>Name</span>
+                              <span className="text-right">Action</span>
+                            </div>
+                            {filteredPatients.map(p => (
+                              <div
+                                key={p.patient_id}
+                                className="grid grid-cols-[minmax(72px,auto)_1fr_auto] items-center gap-4 py-3.5 border-b border-slate-50 hover:bg-slate-50/80 transition-colors"
+                              >
+                                <span className="text-sm font-semibold text-sky-700">{p.patient_id}</span>
+                                <span className="text-sm font-medium text-slate-800 truncate">{p.full_name}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => openPatientWorkspace(p)}
+                                  className="justify-self-end px-4 py-2 text-sm font-semibold text-white bg-sky-500 hover:bg-sky-600 rounded-xl transition-colors cursor-pointer shadow-sm whitespace-nowrap"
+                                >
+                                  Open Workspace
+                                </button>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     </div>
                   </motion.div>
-                ))}
-                {isLoading && (
-                  <motion.div
+                ) : (
+                  
+                  /* Patient clinical chat workspace */
+                  <motion.div 
+                    key="chat-workspace"
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="flex justify-start"
+                    exit={{ opacity: 0 }}
+                    className="flex-1 flex h-full overflow-hidden bg-white"
+                    onClick={() => setOpenMenuChatId(null)}
                   >
-                    <div className="flex gap-3 items-center ml-11">
-                      <div className="flex gap-1">
-                        <span className="w-1.5 h-1.5 bg-medical-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                        <span className="w-1.5 h-1.5 bg-medical-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                        <span className="w-1.5 h-1.5 bg-medical-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                    <aside className="w-[260px] border-r border-slate-200 bg-slate-50 flex flex-col shrink-0 h-full">
+                      <div className="p-4 flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-lg bg-sky-500 flex items-center justify-center text-white shadow-sm">
+                          <HeartPulse size={20} />
+                        </div>
+                        <span className="text-base font-bold text-slate-900">MedVeda AI</span>
                       </div>
-                    </div>
+
+                      <div className="px-3 pb-3">
+                        <button
+                          type="button"
+                          onClick={startNewChat}
+                          className="w-full flex items-center justify-center gap-2 py-2.5 rounded-full border border-slate-200 bg-white hover:bg-slate-100 text-sm font-semibold text-slate-700 transition-colors cursor-pointer"
+                        >
+                          <Plus size={16} /> New chat
+                        </button>
+                      </div>
+
+                      <div className="px-3 pb-3">
+                        <div className="bg-white border border-slate-200 rounded-xl px-3 py-3 space-y-2.5 shadow-sm">
+                          <div>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Active patient</p>
+                            <p className="text-sm font-bold text-slate-900 truncate mt-0.5">{activePatient.full_name}</p>
+                            <p className="text-xs font-semibold text-sky-600">{activePatient.patient_id}</p>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 border-t border-slate-50 pt-2">
+                             <div>
+                               <p className="text-[9px] font-bold text-slate-400 uppercase">Age/Gender</p>
+                               <p className="text-[11px] font-medium text-slate-700">{activePatient.age}y / {activePatient.gender}</p>
+                             </div>
+                             <div>
+                               <p className="text-[9px] font-bold text-slate-400 uppercase">Blood Group</p>
+                               <p className="text-[11px] font-medium text-slate-700">{activePatient.blood_group || 'N/A'}</p>
+                             </div>
+                             <div>
+                               <p className="text-[9px] font-bold text-slate-400 uppercase">Visit Date</p>
+                               <p className="text-[11px] font-medium text-slate-700">{activePatient.visit_date || 'N/A'}</p>
+                             </div>
+                             <div>
+                               <p className="text-[9px] font-bold text-slate-400 uppercase">Visit Type</p>
+                               <p className="text-[11px] font-medium text-slate-700">{activePatient.visit_type || 'N/A'}</p>
+                             </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] font-bold text-slate-400 uppercase">Contact</p>
+                            <p className="text-[11px] font-medium text-slate-700">{activePatient.contact_no || 'N/A'}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto custom-scrollbar px-2">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 mb-2">History</p>
+                        {activePatientChats.length === 0 ? (
+                          <p className="text-xs text-slate-400 px-2 py-4 text-center">No chats yet</p>
+                        ) : (
+                          activePatientChats.map(c => (
+                            <div key={c.id} className="relative group mb-0.5">
+                              <button
+                                type="button"
+                                onClick={() => { setActiveChatId(c.id); setOpenMenuChatId(null); }}
+                                className={`w-full text-left px-3 py-2.5 pr-9 rounded-lg text-sm transition-colors truncate ${
+                                  activeChatId === c.id
+                                    ? 'bg-sky-100 text-sky-800 font-semibold'
+                                    : 'text-slate-600 hover:bg-slate-200/60'
+                                }`}
+                              >
+                                {c.title || 'New chat'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setOpenMenuChatId(openMenuChatId === c.id ? null : c.id); }}
+                                className="absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                              >
+                                <MoreVertical size={14} />
+                              </button>
+                              {openMenuChatId === c.id && (
+                                <div className="absolute right-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-[120px]">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleDeleteChat(c.id, e)}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-rose-600 hover:bg-rose-50 cursor-pointer"
+                                  >
+                                    <Trash2 size={14} /> Delete
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <div className="p-3 border-t border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => { setActivePatient(null); startNewChat(); }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
+                        >
+                          <ArrowLeft size={18} />
+                          <span>Patient worklist</span>
+                        </button>
+                      </div>
+                    </aside>
+
+                    <main className="flex-1 flex flex-col min-w-0 bg-white relative">
+                      <div className="absolute top-4 left-5 flex items-center gap-2 z-10">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                        <span className="text-sm text-slate-500">MedVeda Online</span>
+                      </div>
+
+                      {isChatEmpty ? (
+                        <div className="flex-1 flex flex-col items-center justify-center px-6">
+                          <div className="w-[72px] h-[72px] rounded-2xl bg-sky-500 flex items-center justify-center text-white mb-8 shadow-md">
+                            <HeartPulse size={36} />
+                          </div>
+                          <h1 className="text-3xl font-bold text-slate-900 text-center tracking-tight mb-8">
+                            What can I help you with?
+                          </h1>
+                          <div className="w-full flex justify-center px-4">
+                            {renderChatInput()}
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex-1 overflow-y-auto custom-scrollbar pt-14 pb-4 px-4 md:px-8">
+                            {isLoadingHistory ? (
+                              <div className="h-full flex items-center justify-center">
+                                <div className="w-8 h-8 border-2 border-sky-500 border-t-transparent rounded-full animate-spin" />
+                              </div>
+                            ) : (
+                              <div className="max-w-3xl mx-auto space-y-6">
+                                {messages.map((msg, idx) => (
+                                  <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                                      msg.role === 'user'
+                                        ? 'bg-sky-500 text-white rounded-br-md'
+                                        : 'bg-slate-100 text-slate-800 rounded-bl-md markdown-body'
+                                    }`}>
+                                      {msg.role === 'user' ? msg.text : <ReactMarkdown>{msg.text}</ReactMarkdown>}
+                                    </div>
+                                  </div>
+                                ))}
+                                {isSendingMessage && (
+                                  <div className="flex justify-start">
+                                    <div className="flex gap-1.5 bg-slate-100 px-4 py-3 rounded-2xl">
+                                      <span className="w-2 h-2 bg-sky-400 rounded-full animate-bounce" />
+                                      <span className="w-2 h-2 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                                      <span className="w-2 h-2 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                                    </div>
+                                  </div>
+                                )}
+                                <div ref={messagesEndRef} />
+                              </div>
+                            )}
+                          </div>
+                          <div className="shrink-0 px-4 pb-6 flex justify-center">
+                            {renderChatInput()}
+                          </div>
+                        </>
+                      )}
+                    </main>
                   </motion.div>
                 )}
               </AnimatePresence>
-              <div ref={messagesEndRef} />
             </div>
           )}
         </div>
-
-        {/* Input Area (Only visible when chatting) */}
-        {activeChatId && messages.length > 0 && (
-          <div className="absolute bottom-0 left-0 right-0 p-4 lg:p-8 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent">
-            <div className="max-w-3xl mx-auto">
-              <div className="relative group shadow-xl rounded-2xl border border-slate-200 bg-white overflow-hidden transition-all focus-within:border-medical-300 focus-within:shadow-medical-100">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  disabled={false}
-                  rows={1}
-                  placeholder="Ask anything about your health..."
-                  className={`w-full p-4 pr-16 bg-transparent focus:outline-none rounded-2xl transition-all placeholder:text-slate-400 chat-input custom-scrollbar ${
-                    ''
-                  }`}
-                />
-                <button
-                  onClick={handleSend}
-                  disabled={isLoading || !input.trim()}
-                  className={`
-                    absolute right-2 top-2 bottom-2 px-4 rounded-xl flex items-center justify-center transition-all
-                    ${isLoading || !input.trim() 
-                      ? 'bg-slate-100 text-slate-300 pointer-events-none' 
-                      : 'bg-medical-600 text-white hover:bg-medical-700 shadow-sm active:scale-95'}
-                  `}
-                >
-                  <Send size={18} />
-                </button>
-              </div>
-              <p className="text-[10px] text-center mt-3 text-slate-400 font-medium uppercase tracking-widest">
-                Powered by MedVeda AI • Professional Guidance Required
-              </p>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Login Dialog */}
-      <Dialog 
-        visible={isLoginVisible} 
-        style={{ width: '440px' }} 
-        onHide={() => setIsLoginVisible(false)}
-        draggable={false}
-        resizable={false}
-        className="login-dialog"
-        maskClassName="glass-mask"
-        showHeader={false}
-        dismissableMask={true}
-      >
-        <div className="relative flex flex-col items-center py-10 px-6">
-          <button 
-            onClick={() => setIsLoginVisible(false)}
-            className="absolute top-2 right-2 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-full transition-all"
-            title="Close"
-          >
-            <X size={20} />
-          </button>
-          <div className="w-12 h-12 bg-medical-500 text-white rounded-xl flex items-center justify-center mb-6 shadow-lg shadow-medical-100">
-            <HeartPulse size={28} />
-          </div>
-          
-          <h2 className="text-3xl font-bold text-slate-900 mb-2">Welcome back</h2>
-          <p className="text-slate-500 text-center mb-10 px-4">
-            Sign in to MedVeda AI to save your conversations and access them anywhere.
-          </p>
-          
-          <div className="w-full space-y-4">
-            <button 
-              onClick={() => googleLogin()}
-              className="w-full py-4 bg-white border border-slate-200 text-slate-700 font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-slate-50 hover:border-medical-300 hover:shadow-lg hover:shadow-medical-50 transition-all active:scale-[0.98] group"
-              aria-label="Continue with Google"
-            >
-              <svg width="20" height="20" viewBox="0 0 18 18">
-                <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
-                <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
-                <path d="M3.964 10.71c-.18-.54-.282-1.117-.282-1.71s.102-1.17.282-1.71V4.958H.957C.347 6.173 0 7.548 0 9s.347 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-                <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-              </svg>
-              Continue with Google
-            </button>
-          </div>
-          
-          <div className="mt-10 flex items-center gap-1.5">
-            <span className="text-sm text-slate-500">Don't have an account?</span>
-            <button className="text-sm font-semibold text-medical-600 hover:text-medical-700 underline decoration-2 underline-offset-4">Sign up</button>
-          </div>
-        </div>
-      </Dialog>
-      {/* Logout Confirmation Dialog */}
-      <Dialog 
-        visible={isLogoutVisible} 
-        style={{ width: '400px' }} 
-        onHide={() => setIsLogoutVisible(false)}
-        draggable={false}
-        resizable={false}
-        className="login-dialog"
-        maskClassName="glass-mask"
-        showHeader={false}
-        dismissableMask={true}
-      >
-        <div className="relative flex flex-col items-center py-10 px-6">
-          <h2 className="text-2xl font-bold text-slate-900 mb-4 text-center">Are you sure you want to log out?</h2>
-          <p className="text-slate-500 text-center mb-8 px-4">
-            Log out of MedVeda AI as {user?.email}?
-          </p>
-          
-          <div className="w-full space-y-3">
-            <button 
-              onClick={confirmLogout}
-              className="w-full py-3 bg-slate-900 text-white font-bold rounded-full hover:bg-slate-800 transition-all active:scale-[0.98]"
-            >
-              Log out
-            </button>
-            <button 
-              onClick={() => setIsLogoutVisible(false)}
-              className="w-full py-3 bg-white border border-slate-200 text-slate-700 font-bold rounded-full hover:bg-slate-50 transition-all active:scale-[0.98]"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      </Dialog>
-
-      {/* Login Loading Sequence */}
-      <AnimatePresence>
-        {isLoggingIn && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-white/60 backdrop-blur-xl"
-          >
-            <div className="relative">
-              <div className="w-24 h-24 border-4 border-medical-100 border-t-medical-600 rounded-full animate-spin"></div>
-              <div className="absolute inset-0 flex items-center justify-center text-medical-600">
-                <HeartPulse size={32} className="animate-pulse" />
-              </div>
-            </div>
-            <motion.p 
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 }}
-              className="mt-6 text-xl font-bold premium-text-gradient"
-            >
-              Setting up your workspace...
-            </motion.p>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
   );
 };
 

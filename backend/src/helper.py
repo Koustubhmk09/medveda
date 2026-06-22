@@ -6,18 +6,22 @@ import hashlib
 
 # Extract Data From the PDF File
 def load_pdf_file(data_path):
-    loader = DirectoryLoader(data_path,
-                             glob="*.pdf",
-                             loader_cls=PyPDFLoader, # type: ignore
-                             show_progress=True,
-                             use_multithreading=True)
+    if os.path.isfile(data_path):
+        loader = PyPDFLoader(data_path)
+    else:
+        loader = DirectoryLoader(data_path,
+                                 glob="*.pdf",
+                                 loader_cls=PyPDFLoader, # type: ignore
+                                 show_progress=True,
+                                 use_multithreading=True)
 
     documents = loader.load()
     return documents
 
 # Split the Data into Text Chunks
 def text_split(extracted_data):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=20)
+    # Higher chunk size (1000) and overlap (200) for better clinical context
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     text_chunks = text_splitter.split_documents(extracted_data)
     return text_chunks
 

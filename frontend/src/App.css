@@ -140,3 +140,123 @@
   background: #e2e8f0;
   border-radius: 10px;
 }
+
+/* Clean Crisp Light Clinical Theme Extensions */
+.bg-slate-925 {
+  background-color: #ffffff;
+}
+.bg-slate-950 {
+  background-color: #f8fafc;
+}
+.bg-slate-850 {
+  background-color: #f1f5f9;
+}
+.text-slate-100 {
+  color: #0f172a;
+}
+.text-slate-200 {
+  color: #1e293b;
+}
+.text-slate-300 {
+  color: #334155;
+}
+.text-slate-350 {
+  color: #475569;
+}
+.text-slate-400 {
+  color: #64748b;
+}
+.text-slate-450 {
+  color: #64748b;
+}
+.text-slate-600 {
+  color: #64748b;
+}
+.text-slate-650 {
+  color: #94a3b8;
+}
+.border-slate-850 {
+  border-color: #cbd5e1;
+}
+.border-slate-900 {
+  border-color: #f1f5f9;
+}
+.border-slate-800 {
+  border-color: #e2e8f0;
+}
+.bg-red-950\/30 {
+  background-color: #fef2f2;
+}
+.border-red-900\/50 {
+  border-color: #fca5a5;
+}
+.text-red-450 {
+  color: #dc2626;
+}
+.bg-cyan-950\/20 {
+  background-color: #ecfeff;
+}
+.border-cyan-500\/50 {
+  border-color: #06b6d4;
+}
+.bg-slate-900\/40 {
+  background-color: #ffffff;
+}
+.hover\:bg-slate-900\/60:hover {
+  background-color: #f1f5f9;
+}
+.border-cyan-500\/20 {
+  border-color: #cffafe;
+}
+.bg-cyan-950\/30 {
+  background-color: #ecfeff;
+}
+.border-cyan-900\/50 {
+  border-color: #a5f3fc;
+}
+.bg-slate-925\/20 {
+  background-color: #f8fafc;
+}
+.bg-slate-925\/40 {
+  background-color: #f8fafc;
+}
+.border-slate-900\/60 {
+  border-color: #e2e8f0;
+}
+.shadow-cyan-500\/10 {
+  box-shadow: 0 4px 12px 0 rgba(6, 182, 212, 0.05);
+}
+.shadow-cyan-500\/20 {
+  box-shadow: 0 4px 12px 0 rgba(6, 182, 212, 0.1);
+}
+
+/* Ensure form controls are readable in light theme */
+input, select, textarea {
+  color: #0f172a !important;
+  background-color: #ffffff !important;
+}
+input::placeholder, textarea::placeholder {
+  color: #94a3b8 !important;
+}
+option {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+.bg-slate-950\/50 {
+  background-color: #ffffff !important;
+}
+.bg-slate-950\/60 {
+  background-color: #f1f5f9 !important;
+}
+.bg-slate-900\/30 {
+  background-color: #f8fafc !important;
+}
+.bg-slate-950\/40 {
+  background-color: #f8fafc !important;
+}
+.bg-slate-950\/80 {
+  background-color: rgba(15, 23, 42, 0.4) !important;
+}
+.bg-slate-925\/40 {
+  background-color: #f8fafc !important;
+}

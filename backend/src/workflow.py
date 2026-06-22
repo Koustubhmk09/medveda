@@ -1,8 +1,8 @@
 import json
-from typing import TypedDict, Annotated, List, Union
+from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_groq import ChatGroq
+from langchain_core.messages import BaseMessage
+from langchain_core.language_models.chat_models import BaseChatModel
 from .prompt import classification_prompt, system_prompt, generation_template, contextualize_q_system_prompt
 
 class AgentState(TypedDict):
@@ -12,13 +12,17 @@ class AgentState(TypedDict):
     intent: str
     risk_level: str
     db_context: str
+    medicine_context: str # New field for Davis Drug Guide
     web_context: str
+    patient_context: str
+    doctor_context: str
     final_answer: str
     confidence: str
 
-def create_workflow(llm: ChatGroq, tools: list):
-    medical_tool = tools[0]
-    web_tool = tools[1]
+def create_workflow(llm: BaseChatModel, tools: list):
+    clinical_tool = tools[0]
+    medicine_tool = tools[1]
+    web_tool = tools[2]
 
     # --- NODES ---
 
@@ -40,8 +44,8 @@ def create_workflow(llm: ChatGroq, tools: list):
         query = state["contextualized_query"]
         messages = [
             ("system", classification_prompt)
-        ] + state["messages"] + [
-            ("human", query)
+        ] + [
+            ("human", f"Doctor specialty: {state['doctor_context']}\nQuery: {query}")
         ]
         response = llm.invoke(messages)
         try:
@@ -55,17 +59,27 @@ def create_workflow(llm: ChatGroq, tools: list):
             "risk_level": data.get("risk_level", "LOW")
         }
 
-    def retriever_node(state: AgentState):
-        # Skip retrieval for greetings and simple facts
-        if state["intent"] in ["GREETING", "FACT"]:
+    def clinical_retriever_node(state: AgentState):
+        # Skip retrieval for simple greetings
+        if state["intent"] == "GREETING":
             return {"db_context": "N/A"}
         
-        query = state["contextualized_query"]
-        results = medical_tool.invoke(query)
+        # In a GP clinic, we use the contextualized query directly for broad retrieval
+        enhanced_query = state["contextualized_query"]
+        
+        results = clinical_tool.invoke(enhanced_query)
         return {"db_context": str(results)}
 
+    def medicine_retriever_node(state: AgentState):
+        # STRICLY only retrieive medicine info if explicitly requested
+        if state["intent"] != "MEDICINE_REQUEST":
+            return {"medicine_context": "N/A"}
+            
+        query = state["contextualized_query"]
+        results = medicine_tool.invoke(query)
+        return {"medicine_context": str(results)}
+
     def web_search_node(state: AgentState):
-        # Search web for medical or facts if DB context is thin
         if state["intent"] == "GREETING":
             return {"web_context": "N/A"}
             
@@ -74,11 +88,32 @@ def create_workflow(llm: ChatGroq, tools: list):
         return {"web_context": str(results)}
 
     def generator_node(state: AgentState):
+        # Final prompt combines all contexts
+        # The prompt.py template will handle the persona logic
+        from .prompt import system_prompt, generation_template
+        
+        # --- CONTEXT PURGING LOGIC ---
+        # If the intent is a GREETING, we ZERO BREECH the clinical data.
+        # This prevents the model from even seeing patient data for social chat.
+        if state["intent"] == "GREETING":
+            db_context = "N/A (Ignored for Greeting)"
+            medicine_context = "N/A (Ignored for Greeting)"
+            web_context = "N/A (Ignored for Greeting)"
+            patient_context = "N/A (Ignored for Greeting)"
+        else:
+            db_context = state["db_context"]
+            medicine_context = state.get("medicine_context", "N/A")
+            web_context = state["web_context"]
+            patient_context = state["patient_context"]
+
         prompt = generation_template.format(
+            doctor_context=state["doctor_context"],
+            patient_context=patient_context,
             intent=state["intent"],
-            db_context=state["db_context"],
-            web_context=state["web_context"],
             risk_level=state["risk_level"],
+            db_context=db_context,
+            medicine_context=medicine_context,
+            web_context=web_context,
             query=state["query"]
         )
         
@@ -89,17 +124,7 @@ def create_workflow(llm: ChatGroq, tools: list):
         ]
         
         response = llm.invoke(messages)
-        answer = response.content
-        
-        # Situational Disclaimer Logic: NO disclaimers for GREETING or FACT
-        if state["intent"] in ["MEDICAL_CONCERN", "MEDICINE_REQUEST"]:
-            if "disclaimer" not in answer.lower() and "consult" not in answer.lower():
-                if state["risk_level"] == "HIGH":
-                    answer += "\n\n**IMPORTANT: This situation may require urgent medical attention. Please seek professional help or visit an emergency room immediately.**"
-                else:
-                    answer += "\n\n*A quick note: This is for guidance only. Please consult a qualified doctor for a professional diagnosis.*"
-        
-        return {"final_answer": answer}
+        return {"final_answer": response.content}
 
     # --- GRAPH ---
 
@@ -107,16 +132,19 @@ def create_workflow(llm: ChatGroq, tools: list):
 
     workflow.add_node("contextualize", contextualize_node)
     workflow.add_node("classifier", classifier_node)
-    workflow.add_node("retriever", retriever_node)
+    workflow.add_node("clinical_retriever", clinical_retriever_node)
+    workflow.add_node("medicine_retriever", medicine_retriever_node)
     workflow.add_node("web_search", web_search_node)
     workflow.add_node("generator", generator_node)
 
     workflow.set_entry_point("contextualize")
     
     workflow.add_edge("contextualize", "classifier")
-    workflow.add_edge("classifier", "retriever")
-    workflow.add_edge("retriever", "web_search")
+    workflow.add_edge("classifier", "clinical_retriever")
+    workflow.add_edge("clinical_retriever", "medicine_retriever")
+    workflow.add_edge("medicine_retriever", "web_search")
     workflow.add_edge("web_search", "generator")
     workflow.add_edge("generator", END)
 
     return workflow.compile()
+

@@ -11,18 +11,25 @@ PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
 PINECONE_INDEX_NAME = os.environ.get('PINECONE_INDEX_NAME')
 
 def ingest_data(clear_index=False):
-    # 1. Load Data
-    print("Loading PDF data...")
-    extracted_data = load_pdf_file("data/")
-    
-    # 2. Split Data
-    print("Splitting data into chunks...")
-    text_chunks = text_split(extracted_data)
-    
-    # 3. Generate Unique IDs for Deduplication
-    print("Generating unique IDs for chunks...")
-    ids = generate_ids(text_chunks)
-    
+    # 1. Configuration for the 3 major books
+    books_config = [
+        {
+            "filename": "The_Merck_Manual_of_Diagnosis_and_Therapy_19th Edition.pdf",
+            "source": "Merck Manual 19th Ed",
+            "knowledge_type": "clinical_knowledge"
+        },
+        {
+            "filename": "Medical_book.pdf",
+            "source": "GALE Encyclopedia of Medicine",
+            "knowledge_type": "clinical_knowledge"
+        },
+        {
+            "filename": "Drug Guide for Nurses.pdf",
+            "source": "Davis Drug Guide 11th Ed",
+            "knowledge_type": "medicine_intelligence"
+        }
+    ]
+
     # 4. Download Embeddings
     print("Downloading embeddings model...")
     embeddings = download_hugging_face_embeddings()
@@ -34,44 +41,61 @@ def ingest_data(clear_index=False):
     if clear_index:
         print(f"Clearing all existing data from index: {PINECONE_INDEX_NAME}...")
         index.delete(delete_all=True)
-    
-    # 6. Push to Pinecone with specific IDs
-    print(f"Pushing/Updating {len(text_chunks)} chunks in Pinecone index: {PINECONE_INDEX_NAME}...")
-    
-    # We use the existing index and add documents with IDs. 
-    # If an ID already exists, Pinecone will overwrite (update) it instead of duplicating.
+
     vectorstore = PineconeVectorStore(
         index=index,
         embedding=embeddings,
         pinecone_api_key=PINECONE_API_KEY
     )
-    
-    # Add documents in batches to avoid timeout or payload limits
-    batch_size = 100
-    for i in range(0, len(text_chunks), batch_size):
-        batch_chunks = text_chunks[i:i + batch_size]
-        batch_ids = ids[i:i + batch_size]
+
+    for config in books_config:
+        file_path = os.path.join("data", config["filename"])
+        if not os.path.exists(file_path):
+            print(f"Warning: {config['filename']} not found in data/ folder. Skipping...")
+            continue
+
+        print(f"\nProcessing {config['source']}...")
         
-        # Retry logic for each batch
-        max_retries = 3
-        retry_delay = 5  # seconds
-        for attempt in range(max_retries):
-            try:
-                vectorstore.add_documents(documents=batch_chunks, ids=batch_ids)
-                break  # Success, move to next batch
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    print(f"\nError uploading batch {i//batch_size + 1}: {e}")
-                    print(f"Retrying in {retry_delay} seconds... (Attempt {attempt + 2}/{max_retries})")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    print(f"\nFailed to upload batch {i//batch_size + 1} after {max_retries} attempts.")
-                    raise e
+        # 1. Load Data
+        extracted_data = load_pdf_file(file_path)
+        
+        # 2. Split Data
+        text_chunks = text_split(extracted_data)
+        
+        # 3. Add Metadata
+        for chunk in text_chunks:
+            chunk.metadata["source"] = config["source"]
+            chunk.metadata["knowledge_type"] = config["knowledge_type"]
+            
+        # 4. Generate Unique IDs for Deduplication
+        ids = generate_ids(text_chunks)
+        
+        # 5. Push to Pinecone in batches
+        print(f"Pushing {len(text_chunks)} chunks to Pinecone...")
+        
+        batch_size = 100
+        for i in range(0, len(text_chunks), batch_size):
+            batch_chunks = text_chunks[i:i + batch_size]
+            batch_ids = ids[i:i + batch_size]
+            
+            max_retries = 3
+            retry_delay = 5
+            for attempt in range(max_retries):
+                try:
+                    vectorstore.add_documents(documents=batch_chunks, ids=batch_ids)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"Error uploading batch: {e}. Retrying...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        raise e
+            
+            print(f"Uploaded {min(i + batch_size, len(text_chunks))}/{len(text_chunks)}")
 
-        print(f"Uploaded batch {i//batch_size + 1}/{(len(text_chunks)-1)//batch_size + 1}")
+    print("\nIngestion and cleaning completed successfully!")
 
-    print("Ingestion and cleaning completed successfully!")
 
 if __name__ == "__main__":
     if not PINECONE_API_KEY or not PINECONE_INDEX_NAME:
