@@ -14,6 +14,28 @@ classification_prompt = (
     "Return JSON: {\"intent\": \"...\", \"risk_level\": \"LOW/MEDIUM/HIGH\"}"
 )
 
+# --- COMBINED ANALYSIS PROMPT (Saves Quota) ---
+combined_analysis_prompt = (
+    "Analyze the following conversation history and the new medical query. "
+    "You must perform TWO tasks and return a single JSON object:\n\n"
+    "TASK 1: Contextualization\n"
+    "- Rewrite the user's latest query into a standalone, clear clinical question. "
+    "- If the query already makes sense alone, keep it as-is.\n\n"
+    "TASK 2: Classification\n"
+    "- INTENTS:\n"
+    "  - 'GREETING': Hello/socializing/casual remarks.\n"
+    "  - 'FACT': Requests for patient data, history, or specific facts.\n"
+    "  - 'MEDICINE_REQUEST': Explicitly asking for medicines, dosages, or safety.\n"
+    "  - 'MEDICAL_CONCERN': Clinical reasoning, diagnosis, or treatment planning.\n"
+    "- RISK_LEVEL: LOW, MEDIUM, or HIGH based on clinical severity.\n\n"
+    "Return ONLY a JSON object:\n"
+    "{\n"
+    "  \"contextualized_query\": \"...\",\n"
+    "  \"intent\": \"...\",\n"
+    "  \"risk_level\": \"...\"\n"
+    "}"
+)
+
 # --- SYSTEM PROMPT (General Practitioner Clinical Assistant) ---
 system_prompt = (
     "You are 'MedVeda AI', a Senior Clinical Assistant for a General Practitioner clinic. "
@@ -30,6 +52,12 @@ system_prompt = (
     "   - **Relevance ONLY**: Activate patient context ONLY for clinical queries, analysis, or when asked about specific patients. Do NOT inject patient info into casual chat.\n"
     "   - Every clinical answer must depend on the patient's age, symptoms, history, and existing medications.\n"
     "   - **Professional Summaries**: When asked about a patient, use structured sections: Patient Summary (Age, Condition), Current Symptoms (Bullets), Current Medicines, and Clinical Observations.\n\n"
+
+    "2A. *** CRITICAL CONTEXT PRIORITY RULE ***:\n"
+    "   - The conversation history (what the patient says during THIS session) is ALWAYS the primary source of truth for current symptoms and complaints.\n"
+    "   - If symptoms, complaints, or conditions are mentioned in the current chat (including audio transcripts labeled 'Person 1' or 'Person 2'), you MUST use THOSE for any treatment or medication recommendation.\n"
+    "   - The 'Historical Patient Record (Database)' is ONLY a fallback. If the current conversation contains symptom information, IGNORE the database symptoms for treatment purposes.\n"
+    "   - Example: If audio transcript shows patient mentions 'fever and chest pain' but the database says 'Common Cold', suggest treatment for FEVER AND CHEST PAIN, not Common Cold.\n\n"
 
     "3. RESPONSE FORMATTING (STRICT):\n"
     "   - **NO GIANT PARAGRAPHS**: Use points, sections, bullets, and short paragraphs. Avoid blocks longer than 3 lines.\n"
@@ -64,7 +92,7 @@ system_prompt = (
 # --- GENERATION TEMPLATE ---
 generation_template = (
     "Doctor Specialty: {doctor_context}\n"
-    "Active Patient: {patient_context}\n"
+    "Historical Patient Record (Database): {patient_context}\n"
     "Intent: {intent} | Risk: {risk_level}\n"
     "Clinical Knowledge (GALE/Merck): {db_context}\n"
     "Medication Safety (Davis Guide): {medicine_context}\n"
@@ -73,7 +101,7 @@ generation_template = (
     "Instructions: Provide a specialist-aware, evidence-based response.\n"
     "1. **Format**: Use points, sections, and bullets. NO massive paragraphs.\n"
     "2. **Safety**: If medicine is requested, be 100% safety-focused. Otherwise, DO NOT suggest medicines.\n"
-    "3. **Context**: Only use patient context if relevant to the query.\n"
+    "3. **Context Priority (CRITICAL)**: Check the conversation history above for any symptoms or conditions mentioned by the patient in this session. If found, base your answer on THOSE symptoms. Only use the 'Historical Patient Record (Database)' if no current session symptoms are available.\n"
     "4. **Tone**: Speak warmly and professionally like a senior colleague."
 )
 

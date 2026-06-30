@@ -208,3 +208,8 @@ __marimo__/
 
 # Frontend dependencies
 node_modules/
+
+# MedVeda Runtime Data
+backend/uploads/
+backend/logs/
+backend/data/chats/

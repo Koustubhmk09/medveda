@@ -4,7 +4,8 @@ import ReactMarkdown from 'react-markdown';
 import { 
   Send, MessageSquare, HeartPulse, LogOut, Search, Stethoscope, 
   Activity, ClipboardList, Plus, UserCheck, 
-  AlertCircle, Eye, EyeOff, ArrowLeft, MoreVertical, Trash2
+  AlertCircle, Eye, EyeOff, ArrowLeft, MoreVertical, Trash2,
+  Mic, Paperclip, Loader2, Music, ChevronDown, Star, Square, Play, Pause
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import './App.css';
@@ -62,12 +63,62 @@ const App = () => {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const animationFrameRef = useRef(null);
+
+  // Audio Recording & Upload States
+  const [isRecording, setIsRecording] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [showUploadMenu, setShowUploadMenu] = useState(false);
+  const [isAudioProcessing, setIsAudioProcessing] = useState(false);
+  const [audioChunks, setAudioChunks] = useState([]);
+  const [audioData, setAudioData] = useState(new Array(30).fill(0));
+  
+  // Advanced Audio Intelligence States
+  const [selectedTask, setSelectedTask] = useState('Full Transcript');
+  const [targetLanguage, setTargetLanguage] = useState('auto');
+  const [availableLanguages, setAvailableLanguages] = useState([]);
+  const [audioResult, setAudioResult] = useState(null); // { transcript, output, detected_lang }
+  const [isLangDropdownOpen, setIsLangDropdownOpen] = useState(false);
+  const [isTaskDropdownOpen, setIsTaskDropdownOpen] = useState(false);
+  const [langSearch, setLangSearch] = useState('');
+  
+  // Staged File Workflow
+  const [stagedFile, setStagedFile] = useState(null); // { blob, name, type }
+  const [audioPreviewUrl, setAudioPreviewUrl] = useState(null);
+  const [isConfigExpanded, setIsConfigExpanded] = useState(false);
+
+  // Fetch languages on mount
+  useEffect(() => {
+    const fetchLangs = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/languages`);
+        setAvailableLanguages(res.data.languages || []);
+      } catch (err) {
+        console.error('Failed to fetch languages:', err);
+      }
+    };
+    fetchLangs();
+  }, []);
 
   // Drop legacy persistent login from older builds
   useEffect(() => {
     localStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(SESSION_DOCTOR_KEY);
   }, []);
+
+  useEffect(() => {
+    if (!stagedFile) {
+      setAudioPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(stagedFile.blob);
+    setAudioPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [stagedFile]);
 
   useEffect(() => {
     if (token) {
@@ -246,9 +297,54 @@ const App = () => {
 
   // Send message to MedVeda Clinical AI
   const handleSendMessage = async (e) => {
-    e?.preventDefault();
-    if (!chatInput.trim() || !activePatient || isSendingMessage) return;
+    if (e) e.preventDefault();
+    if (isSendingMessage || isAudioProcessing || isRecording) return;
 
+    const trimmedInput = chatInput.trim();
+    
+    // IF WE HAVE A STAGED FILE, PROCESS IT FIRST
+    if (stagedFile) {
+      // Capture the typed prompt BEFORE processing audio (processAudio clears input)
+      const pendingPrompt = trimmedInput;
+      setChatInput(''); // Clear the input now
+      
+      await processAudio();
+      
+      // If the doctor also typed a message, send it immediately after audio result
+      if (pendingPrompt) {
+        setIsSendingMessage(true);
+        const newUserMessage = { role: 'user', text: pendingPrompt };
+        setMessages(prev => [...prev, newUserMessage]);
+
+        try {
+          const headers = token ? { Authorization: `Bearer ${token}` } : {};
+          const res = await axios.post(`${API_URL}/chat`, {
+            message: pendingPrompt,
+            chat_id: activeChatId,
+            patient_id: activePatient.patient_id
+          }, { headers });
+
+          const assistantMsg = { role: 'assistant', text: res.data.answer };
+          setMessages(prev => [...prev, assistantMsg]);
+
+          if (!activeChatId) {
+            setActiveChatId(res.data.chat_id);
+            const chatListRes = await axios.get(`${API_URL}/chats`, { headers });
+            setDoctorChats(chatListRes.data);
+          }
+        } catch (err) {
+          console.error('Chat error after audio:', err);
+          setMessages(prev => [...prev, { role: 'assistant', text: '**Error:** Failed to connect to MedVeda AI. Please try again.' }]);
+        } finally {
+          setIsSendingMessage(false);
+        }
+      }
+      return; 
+    }
+
+    if (!trimmedInput) return;
+    
+    setIsSendingMessage(true);
     const userMessageText = chatInput.trim();
     const newUserMessage = { role: 'user', text: userMessageText };
     
@@ -292,13 +388,141 @@ const App = () => {
     startNewChat();
   };
 
+  // --- AUDIO FEATURES LOGIC ---
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Setup AudioContext for visualization
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const analyser = audioCtx.createAnalyser();
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 64; 
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      
+      audioContextRef.current = audioCtx;
+      analyserRef.current = analyser;
+
+      const updateVisualizer = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+        
+        // Normalize and reduce to 30 bars
+        const processedData = Array.from(dataArray).slice(0, 30).map(v => v / 255);
+        setAudioData(processedData);
+        
+        animationFrameRef.current = requestAnimationFrame(updateVisualizer);
+      };
+      updateVisualizer();
+
+      const recorder = new MediaRecorder(stream);
+      let chunks = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const audioBlob = new Blob(chunks, { type: 'audio/webm' });
+        setStagedFile({ blob: audioBlob, name: `recording-${Date.now()}.webm`, type: 'audio/webm' });
+        setIsConfigExpanded(true);
+        stream.getTracks().forEach(track => track.stop());
+        
+        // Final cleanup
+        if (audioContextRef.current) audioContextRef.current.close();
+        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+        analyserRef.current = null;
+        setAudioData(new Array(30).fill(0));
+      };
+      
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      setAudioChunks(chunks);
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setStagedFile({
+        blob: file,
+        name: file.name,
+        type: file.type
+      });
+      setShowUploadMenu(false);
+      setIsConfigExpanded(true); 
+    }
+  };
+
+  const processAudio = async () => {
+    if (!stagedFile || !activePatient) return;
+
+    setIsAudioProcessing(true);
+    setAudioResult(null); 
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', stagedFile.blob, stagedFile.name);
+      formData.append('task', selectedTask);
+      if (targetLanguage && targetLanguage !== 'auto') {
+        formData.append('target_language', targetLanguage);
+      }
+      
+      // Step 1: Process Audio (Gemini)
+      const res = await axios.post(`${API_URL}/process-audio`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      if (res.data) {
+        // Step 2: Persist to History
+        const headers = token ? { Authorization: `Bearer ${token}` } : {};
+        const persistRes = await axios.post(`${API_URL}/audio/persist-chat`, {
+          patient_id: activePatient.patient_id,
+          transcript: res.data.transcript_text,
+          output: `[Audio Result: ${selectedTask}]\n${res.data.output_text}`,
+          chat_id: activeChatId
+        }, { headers });
+
+        // Step 3: Handle navigation/state
+        if (persistRes.data.new_chat) {
+          setActiveChatId(persistRes.data.chat_id);
+          const chatListRes = await axios.get(`${API_URL}/chats`, { headers });
+          setDoctorChats(chatListRes.data);
+        }
+
+        // Step 4: Add to local messages state immediately
+        const userMsg = { 
+          role: 'user', 
+          text: `[Audio Transcript]\n${res.data.transcript_text}` 
+        };
+        const assistantMsg = { 
+          role: 'assistant', 
+          text: `[Audio Result: ${selectedTask}]\n${res.data.output_text}` 
+        };
+        setMessages(prev => [...prev, userMsg, assistantMsg]);
+
+        setStagedFile(null); 
+      }
+    } catch (err) {
+      console.error('Audio processing/persistence error:', err);
+    } finally {
+      setIsAudioProcessing(false);
+    }
+  };
+
   const handleDeleteChat = async (chatId, e) => {
     e?.stopPropagation();
     if (!token) return;
     try {
-      await axios.delete(`${API_URL}/chats/${chatId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      await axios.delete(`${API_URL}/chats/${chatId}`, { headers: { Authorization: `Bearer ${token}` } });
       setDoctorChats(prev => prev.filter(c => c.id !== chatId));
       if (activeChatId === chatId) startNewChat();
       setOpenMenuChatId(null);
@@ -308,48 +532,317 @@ const App = () => {
   };
 
   const parsePatientNum = (id) => parseInt(String(id).replace(/\D/g, ''), 10) || 0;
-
   const filteredPatients = patients
-    .filter(p =>
-      p.full_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.patient_id.toLowerCase().includes(searchQuery.toLowerCase())
-    )
+    .filter(p => p.full_name.toLowerCase().includes(searchQuery.toLowerCase()) || p.patient_id.toLowerCase().includes(searchQuery.toLowerCase()))
     .sort((a, b) => parsePatientNum(a.patient_id) - parsePatientNum(b.patient_id));
 
-  // Filter chats specifically for the active patient
-  const activePatientChats = activePatient 
-    ? doctorChats.filter(c => c.patient_id === activePatient.patient_id)
-    : [];
-
+  const activePatientChats = activePatient ? doctorChats.filter(c => c.patient_id === activePatient.patient_id) : [];
   const isChatEmpty = messages.length === 0 && !isLoadingHistory;
 
   const renderChatInput = () => (
-    <form
-      onSubmit={handleSendMessage}
-      className="w-full max-w-2xl flex items-center gap-3 bg-white border border-slate-200 rounded-3xl px-5 py-3 shadow-lg focus-within:border-sky-400 focus-within:ring-2 focus-within:ring-sky-100 transition-all"
-    >
-      <textarea
-        rows={1}
-        placeholder="Describe your health concern or ask a question..."
-        value={chatInput}
-        onChange={e => setChatInput(e.target.value)}
-        onKeyDown={e => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleSendMessage();
-          }
-        }}
-        className="flex-1 bg-transparent border-none text-sm leading-normal focus:outline-none resize-none py-1 text-slate-900 placeholder:text-slate-400"
-        style={{ minHeight: '24px', maxHeight: '120px' }}
+    <div className="w-full max-w-3xl relative mx-auto px-4">
+      
+
+      <div className="relative z-10">
+        <form
+          onSubmit={handleSendMessage}
+          className="flex flex-col gap-0 bg-white border border-slate-200 rounded-[2rem] shadow-xl focus-within:border-sky-400 focus-within:ring-4 focus-within:ring-sky-100 transition-all"
+        >
+          <AnimatePresence>
+            {stagedFile && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="px-4 pt-4"
+              >
+                <div className="bg-slate-50 border border-slate-200 rounded-3xl p-4 flex flex-col gap-3 group shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 bg-slate-200 text-slate-600 rounded-xl flex items-center justify-center">
+                        <Music size={18} />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-800 truncate max-w-[250px]">{stagedFile.name}</p>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Ready to process</p>
+                      </div>
+                    </div>
+                    <button 
+                      type="button"
+                      onClick={() => setStagedFile(null)}
+                      className="w-8 h-8 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center hover:bg-slate-300 transition-colors"
+                    >
+                      <Plus size={16} className="rotate-45" />
+                    </button>
+                  </div>
+                  
+                  {audioPreviewUrl && (
+                    <div className="px-1">
+                      <audio 
+                        src={audioPreviewUrl} 
+                        controls 
+                        className="w-full h-9 rounded-full bg-transparent [&::-webkit-media-controls-panel]:bg-slate-100 [&::-webkit-media-controls-enclosure]:bg-slate-100" 
+                      />
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="flex items-center gap-2 px-4 py-3">
+            {/* Plus Button */}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setShowUploadMenu(!showUploadMenu); }}
+              className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all cursor-pointer ${
+                showUploadMenu ? 'bg-slate-100 text-slate-900 rotate-45' : 'text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <Plus size={22} />
+            </button>
+
+            {!isRecording ? (
+              <textarea
+                rows={1}
+                placeholder="Ask anything or upload audio to get started..."
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                disabled={isAudioProcessing}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+                className="flex-1 bg-transparent border-none text-sm font-medium leading-normal focus:outline-none resize-none py-2 text-slate-900 placeholder:text-slate-400"
+                style={{ minHeight: '24px', maxHeight: '120px' }}
+              />
+            ) : (
+              <div className="flex-1 flex items-center justify-center gap-1 h-9 px-4 overflow-hidden">
+                {audioData.map((val, i) => (
+                  <motion.div
+                    key={i}
+                    animate={{ 
+                      height: `${4 + val * 24}px`,
+                      backgroundColor: val > 0.4 ? '#3b82f6' : '#cbd5e1'
+                    }}
+                    className="w-1 rounded-full bg-slate-300"
+                  />
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Chevron Toggle (Image 2 style) */}
+              <button
+                type="button"
+                onClick={() => setIsConfigExpanded(!isConfigExpanded)}
+                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                  isConfigExpanded ? 'bg-sky-50 text-sky-600' : 'text-slate-400 hover:bg-slate-50'
+                }`}
+              >
+                <motion.div animate={{ rotate: isConfigExpanded ? 180 : 0 }}>
+                  <ChevronDown size={20} />
+                </motion.div>
+              </button>
+
+              {/* Mic Button */}
+              {!isAudioProcessing && (
+                <button
+                  type="button"
+                  onClick={isRecording ? stopRecording : startRecording}
+                  className={`w-10 h-10 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                    isRecording 
+                      ? 'bg-slate-100 text-slate-900 shadow-inner' 
+                      : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
+                >
+                  {isRecording ? <Square size={16} fill="currentColor" /> : <Mic size={20} />}
+                </button>
+              )}
+
+              {/* Send/Process Button (Blue Arrow) */}
+              <button
+                type="submit"
+                disabled={isSendingMessage || (!chatInput.trim() && !stagedFile) || isAudioProcessing || isRecording}
+                className="w-10 h-10 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center disabled:opacity-40 cursor-pointer transition-all shadow-md active:scale-95"
+              >
+                {isAudioProcessing ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+              </button>
+            </div>
+          </div>
+
+          {/* Integrated Config Panel (Image 2 style) */}
+          <AnimatePresence>
+            {isConfigExpanded && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="border-t border-slate-100 bg-slate-50/50 p-4"
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Task Card */}
+                  <div className="bg-white border border-slate-200 rounded-2xl p-3 flex items-center gap-4 shadow-sm relative hover:border-sky-300 transition-colors">
+                    <div className="w-10 h-10 bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center">
+                       <Activity size={20} />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Clinical Task</p>
+                      <button
+                        type="button"
+                        onClick={() => setIsTaskDropdownOpen(!isTaskDropdownOpen)}
+                        className="w-full flex items-center justify-between text-xs font-bold text-slate-800 focus:outline-none cursor-pointer"
+                      >
+                        <span>{selectedTask}</span>
+                        <ChevronDown size={14} className={`text-slate-400 transition-transform ${isTaskDropdownOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                    </div>
+
+                    <AnimatePresence>
+                      {isTaskDropdownOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="absolute bottom-full left-0 mb-3 w-full bg-white border border-slate-200 rounded-3xl shadow-2xl z-[60] overflow-hidden glass-morphism active-border-sky p-1 max-h-48 overflow-y-auto custom-scrollbar"
+                        >
+                          {[
+                            { label: 'Full Transcript', value: 'Full Transcript' },
+                            { label: 'Summary', value: 'Summary' },
+                            { label: 'Keywords', value: 'Keywords' }
+                          ].map(item => (
+                            <button
+                              key={item.value}
+                              type="button"
+                              onClick={() => { setSelectedTask(item.value); setIsTaskDropdownOpen(false); }}
+                              className={`w-full text-left px-4 py-2.5 text-xs font-bold rounded-xl transition-all mb-0.5 cursor-pointer ${
+                                selectedTask === item.value 
+                                  ? 'bg-sky-500 text-white shadow-md shadow-sky-100' 
+                                  : 'text-slate-700 hover:bg-slate-50 hover:text-sky-600'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  {/* Language Card */}
+                  <div className="bg-white border border-slate-200 rounded-2xl p-3 flex items-center gap-4 shadow-sm relative hover:border-sky-300 transition-colors">
+                    <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center">
+                       <Search size={20} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-0.5">Output Language</p>
+                      <button
+                        type="button"
+                        onClick={() => setIsLangDropdownOpen(!isLangDropdownOpen)}
+                        className="w-full flex items-center justify-between text-xs font-bold text-slate-800 focus:outline-none cursor-pointer"
+                      >
+                        <span className="truncate">{availableLanguages.find(l => l.code === targetLanguage)?.name || 'English (Default)'}</span>
+                        <ChevronDown size={14} className={`text-slate-400 transition-transform ${isLangDropdownOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                    </div>
+
+                    <AnimatePresence>
+                      {isLangDropdownOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="absolute bottom-full left-0 mb-3 w-full bg-white border border-slate-200 rounded-3xl shadow-2xl z-[60] overflow-hidden glass-morphism active-border-sky"
+                        >
+                          <div className="p-3 border-b border-slate-100 bg-slate-50/50">
+                            <input 
+                              type="text"
+                              placeholder="Search language..."
+                              value={langSearch}
+                              onChange={(e) => setLangSearch(e.target.value)}
+                              className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-sky-400 font-medium"
+                              autoFocus
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </div>
+                          <div className="max-h-64 overflow-y-auto custom-scrollbar p-1">
+                            <button
+                              type="button"
+                              onClick={() => { setTargetLanguage('auto'); setIsLangDropdownOpen(false); }}
+                              className="w-full text-left px-4 py-2.5 text-xs font-bold text-slate-500 hover:bg-slate-50 hover:text-sky-600 rounded-xl transition-all cursor-pointer mb-0.5"
+                            >
+                              English (Default)
+                            </button>
+                            {availableLanguages
+                              .filter(l => l.name.toLowerCase().includes(langSearch.toLowerCase()))
+                              .map(lang => (
+                                <button
+                                  key={lang.code}
+                                  type="button"
+                                  onClick={() => { 
+                                    setTargetLanguage(lang.code); 
+                                    setIsLangDropdownOpen(false); 
+                                    setLangSearch('');
+                                  }}
+                                  className={`w-full text-left px-4 py-2.5 text-xs font-bold rounded-xl transition-all mb-0.5 cursor-pointer ${
+                                    targetLanguage === lang.code 
+                                      ? 'bg-sky-500 text-white shadow-md shadow-sky-100' 
+                                      : 'text-slate-700 hover:bg-slate-50 hover:text-sky-600'
+                                  }`}
+                                >
+                                  {lang.name}
+                                </button>
+                              ))
+                            }
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                </div>
+                
+                <div className="mt-4 flex items-center justify-center gap-2 py-2 px-4 bg-sky-50/50 rounded-xl border border-sky-100/50">
+                  <Star size={14} className="text-sky-400 animate-pulse" />
+                  <p className="text-[10px] font-bold text-sky-700 uppercase tracking-widest">Tip: You can change task or language anytime</p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Upload Menu */}
+          <AnimatePresence>
+            {showUploadMenu && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                className="absolute bottom-full left-4 mb-3 bg-white border border-slate-200 rounded-2xl shadow-2xl py-2 min-w-[200px] z-50 overflow-hidden"
+              >
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+                >
+                  <Music size={18} className="text-sky-500" />
+                  <span>Upload Audio File</span>
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </form>
+      </div>
+
+      {/* Hidden File Input */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileUpload}
+        className="hidden"
+        accept="audio/*"
       />
-      <button
-        type="submit"
-        disabled={isSendingMessage || !chatInput.trim()}
-        className="w-9 h-9 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shrink-0 disabled:opacity-40 cursor-pointer transition-colors"
-      >
-        <Send size={16} />
-      </button>
-    </form>
+    </div>
   );
 
   return (
@@ -823,17 +1316,69 @@ const App = () => {
                               </div>
                             ) : (
                               <div className="max-w-3xl mx-auto space-y-6">
-                                {messages.map((msg, idx) => (
-                                  <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
-                                      msg.role === 'user'
-                                        ? 'bg-sky-500 text-white rounded-br-md'
-                                        : 'bg-slate-100 text-slate-800 rounded-bl-md markdown-body'
-                                    }`}>
-                                      {msg.role === 'user' ? msg.text : <ReactMarkdown>{msg.text}</ReactMarkdown>}
+                                {messages.map((msg, idx) => {
+                                  // Detect audio transcript messages
+                                  const isAudioMsg = msg.text && msg.text.startsWith('[Audio Transcript]');
+                                  const prevMsg = messages[idx - 1];
+                                  const isPrevAudio = prevMsg?.text?.startsWith('[Audio Transcript]');
+                                  const nextMsg = messages[idx + 1];
+                                  const isNextAudio = nextMsg?.text?.startsWith('[Audio Transcript]');
+
+                                  // If this is an Audio user msg (transcript), skip - it will be rendered with the next assistant msg as a pair
+                                  if (isAudioMsg && msg.role === 'user') {
+                                    return null;
+                                  }
+
+                                  // If this is an assistant msg that follows an Audio user msg, render as structured card
+                                  if (msg.role === 'assistant' && isPrevAudio) {
+                                    const transcript = prevMsg.text.replace('[Audio Transcript]\n', '');
+                                    
+                                    // Parse task from assistant msg if present
+                                    const taskMatch = msg.text.match(/^\[Audio Result: (.*?)\]\n/);
+                                    const taskHeader = taskMatch ? taskMatch[1] : (selectedTask === 'Full Transcript' ? 'Diarized Output' : selectedTask);
+                                    const output = taskMatch ? msg.text.split('\n').slice(1).join('\n') : msg.text;
+
+                                    return (
+                                      <div key={idx} className="w-full">
+                                        <div className="bg-white border border-slate-200 rounded-3xl shadow-sm overflow-hidden">
+                                          <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-100">
+                                            <div className="p-5">
+                                              <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Transcript</h5>
+                                              <div className="text-sm text-slate-600 leading-loose space-y-2">
+                                                {transcript.split('\n').filter(Boolean).map((line, i) => (
+                                                  <p key={i} className={`${line.match(/^Person \d+ -|^Person -/) ? 'font-semibold text-slate-700' : ''}`}>{line}</p>
+                                                ))}
+                                              </div>
+                                            </div>
+                                            <div className="p-5 bg-sky-50/30">
+                                              <h5 className="text-[10px] font-bold text-sky-500 uppercase tracking-widest mb-4">
+                                                {taskHeader === 'Full Transcript' ? 'Diarized Output' : taskHeader}
+                                              </h5>
+                                              <div className="text-sm text-slate-800 leading-loose whitespace-pre-wrap space-y-2">
+                                                {output.split('\n').map((line, i) => (
+                                                  <p key={i} className={`${line.match(/^Person \d+ -|^Person -/) ? 'font-bold text-sky-700' : ''}`}>{line}</p>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    );
+                                  }
+
+                                  // Regular chat message
+                                  return (
+                                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                      <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                                        msg.role === 'user'
+                                          ? 'bg-sky-500 text-white rounded-br-md'
+                                          : 'bg-slate-100 text-slate-800 rounded-bl-md markdown-body'
+                                      }`}>
+                                        {msg.role === 'user' ? msg.text : <ReactMarkdown>{msg.text}</ReactMarkdown>}
+                                      </div>
                                     </div>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                                 {isSendingMessage && (
                                   <div className="flex justify-start">
                                     <div className="flex gap-1.5 bg-slate-100 px-4 py-3 rounded-2xl">

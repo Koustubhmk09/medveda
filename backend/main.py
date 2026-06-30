@@ -2,7 +2,7 @@ import os
 import logging
 import json
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -26,6 +26,15 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import create_retriever_tool, tool
 from langchain_core.messages import HumanMessage, AIMessage
 from duckduckgo_search import DDGS
+from uuid import uuid4
+
+# Audio Transcript Services
+from src.services.audio_transcript import (
+    get_language_list,
+    process_audio,
+    process_multi_speaker_audio,
+)
+from src.services.ask_anything_service import answer_question as answer_audio_question
 
 # Load environment variables
 load_dotenv()
@@ -51,7 +60,7 @@ app.add_middleware(
 PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
 PINECONE_INDEX_NAME = os.environ.get('PINECONE_INDEX_NAME')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-1.5-flash')
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
 
 # AI Initialization State Tracking
 class AIStatus:
@@ -88,6 +97,26 @@ llm = None
 DATA_DIR = Path("data/chats")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Audio Uploads and Logs Setup
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm"}
+MIME_EXTENSION_MAP = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/ogg": ".ogg",
+    "audio/flac": ".flac",
+    "audio/webm": ".webm",
+}
+
 def get_chats_file(user_id):
     return DATA_DIR / f"chats_{user_id}.json"
 
@@ -109,6 +138,24 @@ def save_user_chats(user_id, chats):
             json.dump(chats, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving chats for user {user_id}: {e}")
+
+def call_gemini_with_retry(func, *args, max_retries=3, **kwargs):
+    """Simple retry logic for handling transient Gemini API errors (like 429)."""
+    last_error = None
+    for i in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            # If it's a quota or rate limit error, wait and retry
+            if "429" in error_str or "resource_exhausted" in error_str:
+                wait_time = (i + 1) * 2 # Exponential wait
+                logger.warning(f"Gemini Rate Limit (429). Retrying in {wait_time}s... (Attempt {i+1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            raise e
+    raise last_error
 
 def initialize_ai():
     global app_workflow, llm
@@ -329,7 +376,8 @@ async def chat(request: ChatRequest, current_user: Admin = Depends(get_current_u
             "patient_context": patient_context,
             "doctor_context": doctor_context
         }
-        result = app_workflow.invoke(inputs)
+        # Use retry logic for the main workflow invocation
+        result = call_gemini_with_retry(app_workflow.invoke, inputs)
         answer = result["final_answer"]
     except Exception as e:
         logger.error(f"AI error: {e}")
@@ -342,12 +390,19 @@ async def chat(request: ChatRequest, current_user: Admin = Depends(get_current_u
     if not active_chat:
         chat_id = str(int(datetime.now(timezone.utc).timestamp()))
         new_chat_created = True
+        
+        # LAZY TITLE GENERATION: Use message snippet first to save API quota
+        chat_title = request.message[:30] + ( "..." if len(request.message) > 30 else "")
+        
+        # Only try LLM title generation if it's a non-greeting to save quota
+        # and wrap it in a try-block so it doesn't crash the chat if quota is hit
         try:
+            # We don't use retry here as title is non-critical
             title_response = llm.invoke(title_generation_prompt.format(query=request.message))
-            chat_title = title_response.content.strip().strip('"').strip("'")
+            if title_response and title_response.content:
+                chat_title = title_response.content.strip().strip('"').strip("'")
         except Exception as e:
-            logger.error(f"Title generation error: {e}")
-            chat_title = request.message[:30] + "..."
+            logger.warning(f"Title generation skipped due to quota or error: {e}")
 
         active_chat = {
             "id": chat_id,
@@ -451,6 +506,155 @@ async def health():
         "last_ping": ai_status.last_ping,
         "message": "MedVeda AI is ready" if ai_status.status == "ready" else f"AI is currently: {ai_status.status}"
     }
+
+def get_upload_extension(file: UploadFile) -> str:
+    extension = os.path.splitext(file.filename or "")[1].lower()
+    if extension:
+        return extension
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    return MIME_EXTENSION_MAP.get(content_type, "")
+
+def infer_audio_source(file: UploadFile) -> str:
+    filename = (file.filename or "").strip().lower()
+    if filename in {"recording.wav", "recording.webm", "recording.ogg"}:
+        return "Recording"
+    return "Upload"
+
+def save_uploaded_file(file: UploadFile, extension: str) -> str:
+    if extension not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{extension}'. Allowed: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}",
+        )
+    filename = f"{uuid4().hex}{extension}"
+    file_path = UPLOAD_DIR / filename
+    with open(file_path, "wb") as buffer:
+        buffer.write(file.file.read())
+    return str(file_path)
+
+# Audio Transcription Endpoints
+@app.get("/languages")
+async def get_languages():
+    """Returns the full list of supported languages for source audio detection."""
+    return {"languages": get_language_list()}
+
+@app.post("/process-audio")
+async def process_audio_api(
+    file: UploadFile = File(..., description="Audio file to process"),
+    task: str = Form(..., description="One of: 'Full Transcript', 'Summary', 'Keywords'"),
+    language: str = Form(None, description="Source language code (or 'auto' for auto-detection)"),
+    target_language: str = Form(None, description="Target language code for translation output"),
+):
+    valid_tasks = {"Full Transcript", "Summary", "Keywords"}
+    if task not in valid_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid task '{task}'. Must be one of: {', '.join(valid_tasks)}",
+        )
+
+    try:
+        extension = get_upload_extension(file)
+        start_total = time.perf_counter()
+        file_path = save_uploaded_file(file, extension)
+
+        # We use process_audio (Gemini Direct) instead of process_multi_speaker_audio (Diarization Subprocess)
+        # to avoid the need for a local ML environment and fixed [WinError 2] issues.
+        result = process_audio(
+            file_path=file_path,
+            task=task,
+            language=language,
+            target_language=target_language,
+        )
+
+        total_time = time.perf_counter() - start_total
+        logger.info(f"Audio processed in {total_time:.2f}s")
+
+        return result
+    except Exception as e:
+        logger.error(f"Audio processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+class AudioPersistRequest(BaseModel):
+    transcript: str
+    output: str
+    patient_id: str
+    chat_id: Optional[str] = None
+
+@app.post("/audio/persist-chat")
+async def persist_audio_chat(request: AudioPersistRequest, current_user: Admin = Depends(get_current_user)):
+    chat_id = request.chat_id
+    chats = load_user_chats(current_user.id)
+    new_chat_created = False
+    chat_title = "Audio Intelligence Session"
+
+    if not chat_id:
+        chat_id = str(uuid4())
+        new_chat_created = True
+        # Generate a short title from the transcript if possible
+        if len(request.transcript) > 10:
+            try:
+                # Simple fallback for title if LLM not available or just use first few words
+                chat_title = " ".join(request.transcript.split()[:5]) + "..."
+            except:
+                pass
+        
+        active_chat = {
+            "id": chat_id,
+            "title": chat_title,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "patient_id": request.patient_id,
+            "messages": []
+        }
+        chats.append(active_chat)
+    else:
+        active_chat = next((c for c in chats if c["id"] == chat_id), None)
+        if not active_chat:
+             # Fallback if ID sent but not found
+             chat_id = str(uuid4())
+             new_chat_created = True
+             active_chat = {
+                "id": chat_id,
+                "title": chat_title,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "patient_id": request.patient_id,
+                "messages": []
+            }
+             chats.append(active_chat)
+
+    # Append transcript as user message and output as AI response
+    active_chat["messages"].append({
+        "role": "user", 
+        "content": f"[Audio Transcript]\n{request.transcript}", 
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    active_chat["messages"].append({
+        "role": "assistant", 
+        "content": request.output, 
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    save_user_chats(current_user.id, chats)
+    return {
+        "chat_id": chat_id, 
+        "title": active_chat.get("title"),
+        "new_chat": new_chat_created
+    }
+
+class AudioQuestionRequest(BaseModel):
+    question: str
+    transcript: str
+
+@app.post("/audio/ask-question")
+async def ask_audio_question_api(request: AudioQuestionRequest):
+    try:
+        result = answer_audio_question(
+            question=request.question,
+            transcript_text=request.transcript
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Audio QA failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

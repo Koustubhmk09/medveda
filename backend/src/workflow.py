@@ -26,35 +26,30 @@ def create_workflow(llm: BaseChatModel, tools: list):
 
     # --- NODES ---
 
-    def contextualize_node(state: AgentState):
-        """Rewrites the user query to be standalone if there's history."""
-        if not state["messages"]:
-            return {"contextualized_query": state["query"]}
+    def query_analysis_node(state: AgentState):
+        """Combines contextualization and classification into one LLM call to save quota."""
+        from .prompt import combined_analysis_prompt
         
         messages = [
-            ("system", contextualize_q_system_prompt)
+            ("system", combined_analysis_prompt)
         ] + state["messages"] + [
-            ("human", state["query"])
+            ("human", f"Doctor specialty: {state['doctor_context']}\nNew Patient Query: {state['query']}")
         ]
         
-        response = llm.invoke(messages)
-        return {"contextualized_query": response.content.strip()}
-
-    def classifier_node(state: AgentState):
-        query = state["contextualized_query"]
-        messages = [
-            ("system", classification_prompt)
-        ] + [
-            ("human", f"Doctor specialty: {state['doctor_context']}\nQuery: {query}")
-        ]
         response = llm.invoke(messages)
         try:
             clean_content = response.content.strip().replace("```json", "").replace("```", "")
             data = json.loads(clean_content)
         except:
-            data = {"intent": "MEDICAL_CONCERN", "risk_level": "LOW"}
+            # Fallback if LLM fails to return valid JSON
+            data = {
+                "contextualized_query": state["query"],
+                "intent": "MEDICAL_CONCERN",
+                "risk_level": "LOW"
+            }
         
         return {
+            "contextualized_query": data.get("contextualized_query", state["query"]),
             "intent": data.get("intent", "MEDICAL_CONCERN"),
             "risk_level": data.get("risk_level", "LOW")
         }
@@ -124,23 +119,22 @@ def create_workflow(llm: BaseChatModel, tools: list):
         ]
         
         response = llm.invoke(messages)
-        return {"final_answer": response.content}
+        answer = response.content if response and response.content else "I'm sorry, I was unable to generate a response. Please try again."
+        return {"final_answer": answer}
 
     # --- GRAPH ---
 
     workflow = StateGraph(AgentState)
 
-    workflow.add_node("contextualize", contextualize_node)
-    workflow.add_node("classifier", classifier_node)
+    workflow.add_node("analyze_query", query_analysis_node)
     workflow.add_node("clinical_retriever", clinical_retriever_node)
     workflow.add_node("medicine_retriever", medicine_retriever_node)
     workflow.add_node("web_search", web_search_node)
     workflow.add_node("generator", generator_node)
 
-    workflow.set_entry_point("contextualize")
+    workflow.set_entry_point("analyze_query")
     
-    workflow.add_edge("contextualize", "classifier")
-    workflow.add_edge("classifier", "clinical_retriever")
+    workflow.add_edge("analyze_query", "clinical_retriever")
     workflow.add_edge("clinical_retriever", "medicine_retriever")
     workflow.add_edge("medicine_retriever", "web_search")
     workflow.add_edge("web_search", "generator")
